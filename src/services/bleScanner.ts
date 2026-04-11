@@ -12,6 +12,9 @@ const AIRAWARE_OUI = ['98:A3:16:7D', '98:a3:16:7d'];
 // AirAware BLE manufacturer ID used for the identity advertisement
 const AIRAWARE_COMPANY_ID = 0x08FE;
 
+// Max api_key length we'll read from the identity advertisement payload
+const API_KEY_MAX_LEN = 64;
+
 let bleManager: BleManager | null = null;
 let scanning = false;
 
@@ -49,7 +52,7 @@ function formatMac(bytes: Buffer): string {
 }
 
 // AirAware identity advertisement layout:
-//   [company_id_LE (2 bytes)][mac (6 bytes)][api_key (remaining, UTF-8)]
+//   [company_id_LE (2 bytes)][mac (6 bytes)][api_key (up to 64 bytes, UTF-8)]
 function parseIdentityAdvertisement(
   manufacturerDataB64: string,
 ): { mac: string; apiKey: string } | null {
@@ -59,7 +62,11 @@ function parseIdentityAdvertisement(
     const companyId = bytes[0] | (bytes[1] << 8);
     if (companyId !== AIRAWARE_COMPANY_ID) return null;
     const mac = formatMac(bytes.slice(2, 8));
-    const apiKey = bytes.slice(8).toString('utf8').replace(/\0+$/, '');
+
+    // Read the full api_key string: all bytes after the 6-byte MAC, capped
+    // at API_KEY_MAX_LEN. Trim any trailing NULs from C-string padding.
+    const apiKeyEnd = Math.min(bytes.length, 8 + API_KEY_MAX_LEN);
+    const apiKey = bytes.slice(8, apiKeyEnd).toString('utf8').replace(/\0+$/, '');
     if (!apiKey) return null;
     return { mac, apiKey };
   } catch {
@@ -102,6 +109,16 @@ export async function startBleScanning(
 
       const rssi = device.rssi ?? -100;
       const now = Date.now();
+
+      // TEMP: log all AirAware-named advertisements so we can see whether
+      // manufacturerData is coming through and what it contains.
+      if (device.name && device.name.startsWith('AirAware')) {
+        console.log('[BLE AirAware]', {
+          id: device.id,
+          name: device.name,
+          manufacturerData: device.manufacturerData,
+        });
+      }
 
       // 1) Identity advertisement (authoritative — gives us MAC + api key).
       //    On iOS device.id is a CoreBluetooth UUID, not a MAC, so the
