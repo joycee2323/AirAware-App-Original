@@ -8,7 +8,7 @@ import { useAuthStore } from '../store/authStore';
 import { createWebSocket, api } from '../services/api';
 import { useTheme, getDroneColor } from '../theme';
 import { OP_STATUS_AIRBORNE } from '../services/odidParser';
-import { startBackgroundScanning, stopBackgroundScanning } from '../services/bleScanner';
+import { startBleScanning, stopBleScanning } from '../services/bleScanner';
 import * as Location from 'expo-location';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -78,7 +78,7 @@ export default function LiveMapScreen() {
     setMode('backend');
     requestPermissions().then(() => {
       loadActiveDeployment();
-      startBackgroundScanning(
+      startBleScanning(
         det => updateBleDrone(det.mac, det),
         (mac, rssi, apiKey) => {
           updateNearbyNode(mac, rssi);
@@ -88,7 +88,7 @@ export default function LiveMapScreen() {
     });
     return () => {
       wsRef.current?.close();
-      stopBackgroundScanning();
+      stopBleScanning();
       heartbeatTimers.current.forEach(t => clearInterval(t));
       heartbeatTimers.current.clear();
       nodeApiKeys.current.clear();

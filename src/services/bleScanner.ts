@@ -1,6 +1,5 @@
 import { BleManager, Device, State } from 'react-native-ble-plx';
 import { Platform } from 'react-native';
-import BackgroundService from 'react-native-background-actions';
 import { parseOdidAdvertisement, OdidDetection } from './odidParser';
 import { useDroneStore } from '../store/droneStore';
 
@@ -156,67 +155,3 @@ export function isBleScanning(): boolean {
   return scanning;
 }
 
-// --- Android background BLE scanning via foreground service ---
-
-const BG_OPTIONS = {
-  taskName: 'AirAware BLE Scanner',
-  taskTitle: 'AirAware',
-  taskDesc: 'Monitoring for drones',
-  taskIcon: { name: 'ic_launcher', type: 'mipmap' },
-  color: '#00E5FF',
-  linkingURI: 'airaware://',
-  parameters: { delay: 2_147_483_647 }, // ~25 days — effectively infinite
-};
-
-// Stash callbacks so the background task can access them
-let bgOnDetection: ((det: Partial<OdidDetection> & { mac: string; rssi: number }) => void) | null = null;
-let bgOnNearbyNode: ((mac: string, rssi: number, apiKey?: string) => void) | null = null;
-
-async function bgTask(params: any): Promise<void> {
-  // Start the actual BLE scan inside the foreground service
-  if (bgOnDetection) {
-    await startBleScanning(bgOnDetection, bgOnNearbyNode || undefined);
-  }
-  // Keep the task alive — sleep indefinitely so Android doesn't kill it.
-  // BackgroundService.isRunning() becomes false when stopBackgroundScanning is called.
-  await new Promise<void>((resolve) => {
-    const check = setInterval(() => {
-      if (!BackgroundService.isRunning()) {
-        clearInterval(check);
-        resolve();
-      }
-    }, 5000);
-  });
-}
-
-export async function startBackgroundScanning(
-  onDetection: (det: Partial<OdidDetection> & { mac: string; rssi: number }) => void,
-  onNearbyNode?: (mac: string, rssi: number, apiKey?: string) => void,
-): Promise<void> {
-  if (Platform.OS !== 'android') {
-    // iOS handles background BLE via CoreBluetooth background modes
-    return startBleScanning(onDetection, onNearbyNode);
-  }
-
-  bgOnDetection = onDetection;
-  bgOnNearbyNode = onNearbyNode || null;
-
-  try {
-    await BackgroundService.start(bgTask, BG_OPTIONS);
-    console.log('[BG] Background BLE scanning started');
-  } catch (err) {
-    console.warn('[BG] Failed to start background service, falling back:', err);
-    // Fall back to normal scanning if background service fails
-    await startBleScanning(onDetection, onNearbyNode);
-  }
-}
-
-export async function stopBackgroundScanning(): Promise<void> {
-  stopBleScanning();
-  if (Platform.OS === 'android' && BackgroundService.isRunning()) {
-    await BackgroundService.stop();
-    console.log('[BG] Background BLE scanning stopped');
-  }
-  bgOnDetection = null;
-  bgOnNearbyNode = null;
-}
