@@ -15,7 +15,17 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 
 export default function LiveMapScreen() {
   const colors = useTheme();
-  const { backendDrones, updateBackendDrone, bleDrones, updateBleDrone, nearbyNodes } = useDroneStore();
+
+  // Subscribe to render-relevant state with individual selectors so that
+  // high-frequency BLE updates to nearbyNodes don't re-render the whole screen.
+  const backendDrones = useDroneStore(s => s.backendDrones);
+  const bleDrones = useDroneStore(s => s.bleDrones);
+  const nearbyNodeCount = useDroneStore(s => Object.keys(s.nearbyNodes).length);
+
+  // Actions are stable references — selecting them individually avoids
+  // subscribing to unrelated state changes.
+  const updateBackendDrone = useDroneStore(s => s.updateBackendDrone);
+  const updateBleDrone = useDroneStore(s => s.updateBleDrone);
   const updateNearbyNode = useDroneStore(s => s.updateNearbyNode);
   const setMode = useDroneStore(s => s.setMode);
 
@@ -81,12 +91,14 @@ export default function LiveMapScreen() {
   }, []);
 
   const requestPermissions = async () => {
-    await Location.requestForegroundPermissionsAsync();
+    const locResult = await Location.requestForegroundPermissionsAsync();
+    console.log('Location permission:', locResult.status);
     if (Platform.OS === 'android' && Platform.Version >= 31) {
-      await PermissionsAndroid.requestMultiple([
+      const bleResult = await PermissionsAndroid.requestMultiple([
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
       ]);
+      console.log('Bluetooth permissions:', JSON.stringify(bleResult));
     }
   };
 
@@ -180,7 +192,7 @@ export default function LiveMapScreen() {
           {activeDeployment && (
             <Text style={s.depName}>▸ {activeDeployment.name}</Text>
           )}
-          {Object.keys(nearbyNodes).length > 0 && (
+          {nearbyNodeCount > 0 && (
             <Text style={s.nodeNearby}>📡 NODE IN RANGE</Text>
           )}
         </View>

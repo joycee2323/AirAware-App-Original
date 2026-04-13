@@ -6,11 +6,15 @@ import { useDroneStore } from '../store/droneStore';
 const ODID_SERVICE_UUID = '0000FFFA-0000-1000-8000-00805F9B34FB';
 
 // Hardcoded MAC → API key table for AirAware nodes.
-// manufacturerData is null for extended BLE advertisements on Android,
-// so we fall back to identifying nodes by MAC address + device name.
+// Both manufacturerData and device.name are null for extended BLE
+// advertisements on Android, so we identify nodes by OUI prefix on
+// device.id (which is the MAC on Android) and look up the API key here.
 const NODE_API_KEYS: Record<string, string> = {
   '98:A3:16:7D:26:34': 'fe4e6448-e10e-45bf-b6b1-1b524bdfd173',
   '98:A3:16:7D:26:36': 'fe4e6448-e10e-45bf-b6b1-1b524bdfd173',
+  // COM5 — BLE MAC + softAP MAC fallback
+  '98:A3:16:7D:26:62': '99c169eb52748d90e60c4c6765767282597077fc6514b627ba58b09439ce3acd',
+  '98:A3:16:7D:26:61': '99c169eb52748d90e60c4c6765767282597077fc6514b627ba58b09439ce3acd',
 };
 
 let bleManager: BleManager | null = null;
@@ -79,11 +83,11 @@ export async function startBleScanning(
       const now = Date.now();
       const mac = device.id;
 
-      // 1) AirAware node detection via device name + MAC lookup.
-      //    manufacturerData is always null for extended advertisements on
-      //    Android, so we identify nodes by their "AirAware-X1-*" name and
-      //    resolve the API key from the hardcoded NODE_API_KEYS table.
-      if (device.name && device.name.startsWith('AirAware-X1-')) {
+      // 1) AirAware node detection via OUI prefix on device.id (MAC).
+      //    Both manufacturerData and device.name are null for extended
+      //    advertisements on Android, so we match by OUI and look up the
+      //    API key from the hardcoded NODE_API_KEYS table.
+      if (isAirAwareNode(mac)) {
         const macUpper = mac.toUpperCase();
         const apiKey = NODE_API_KEYS[macUpper];
 
@@ -97,23 +101,10 @@ export async function startBleScanning(
           if (onNodeNearby) onNodeNearby(macUpper, rssi, apiKey);
         } else {
           console.warn(
-            `[BLE] AirAware node ${device.name} (${macUpper}) has no API key in NODE_API_KEYS table`,
+            `[BLE] AirAware OUI device (${macUpper}) has no API key in NODE_API_KEYS table`,
           );
           if (onNodeNearby) onNodeNearby(macUpper, rssi);
         }
-        return;
-      }
-
-      // 2) Other broadcasts from an AirAware OUI MAC (Android, where
-      //    device.id is the MAC). Attach the API key if we already know it.
-      if (isAirAwareNode(mac)) {
-        const macUpper = mac.toUpperCase();
-        const known = discoveredNodes.get(macUpper);
-        if (known) {
-          known.rssi = rssi;
-          known.lastSeen = now;
-        }
-        if (onNodeNearby) onNodeNearby(macUpper, rssi, known?.apiKey);
         return;
       }
 
