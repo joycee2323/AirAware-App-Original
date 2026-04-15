@@ -13,7 +13,6 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
-import android.os.ParcelUuid
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -22,16 +21,11 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.ParcelUuid
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
-import java.io.File
-import java.io.FileWriter
-import java.io.PrintWriter
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.facebook.react.ReactApplication
@@ -40,7 +34,6 @@ import com.facebook.react.bridge.ReactContext
 import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
-import java.util.UUID
 
 class BLEScannerService : Service() {
 
@@ -50,8 +43,6 @@ class BLEScannerService : Service() {
     private var handler: Handler? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var scanning = false
-    private var logWriter: PrintWriter? = null
-    private val logTimestampFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
 
     @Volatile
     private var lastPacketElapsedMs: Long = 0L
@@ -61,11 +52,8 @@ class BLEScannerService : Service() {
             if (!scanning) return
             val idleMs = SystemClock.elapsedRealtime() - lastPacketElapsedMs
             if (idleMs >= WATCHDOG_SILENCE_THRESHOLD_MS) {
-                val now = logTimestampFormat.format(Date())
-                writeLogLine("=== watchdog idle ${idleMs}ms, restarting scan at $now ===")
-                writeLogLine("=== stopScan called at ${logTimestampFormat.format(Date())} ===")
+                Log.d(TAG, "watchdog idle ${idleMs}ms, restarting scan")
                 stopScan()
-                writeLogLine("=== startScan called at ${logTimestampFormat.format(Date())} ===")
                 startScan()
             }
             handler?.postDelayed(this, WATCHDOG_CHECK_INTERVAL_MS)
@@ -81,38 +69,6 @@ class BLEScannerService : Service() {
             handler = Handler(handlerThread!!.looper)
         }
         acquireWakeLockIfNeeded()
-        openPacketLog()
-    }
-
-    private fun openPacketLog() {
-        try {
-            val dir = getExternalFilesDir(null) ?: filesDir
-            val file = File(dir, "ble_log.txt")
-            logWriter = PrintWriter(FileWriter(file, true), true)
-            writeLogLine("=== service onCreate ${logTimestampFormat.format(Date())} ===")
-            Log.d(TAG, "openPacketLog: writing to ${file.absolutePath}")
-        } catch (t: Throwable) {
-            Log.w(TAG, "openPacketLog failed: ${t.message}")
-        }
-    }
-
-    private fun writeLogLine(line: String) {
-        val w = logWriter ?: return
-        try {
-            w.println(line)
-        } catch (_: Throwable) {
-        }
-    }
-
-    private fun closePacketLog() {
-        try {
-            writeLogLine("=== service onDestroy ${logTimestampFormat.format(Date())} ===")
-            logWriter?.flush()
-            logWriter?.close()
-        } catch (_: Throwable) {
-        } finally {
-            logWriter = null
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -138,7 +94,6 @@ class BLEScannerService : Service() {
         stopScan()
         stopForegroundCompat()
         releaseWakeLock()
-        closePacketLog()
         handlerThread?.quitSafely()
         handlerThread = null
         handler = null
@@ -215,7 +170,6 @@ class BLEScannerService : Service() {
 
             override fun onScanFailed(errorCode: Int) {
                 Log.w(TAG, "onScanFailed errorCode=$errorCode")
-                writeLogLine("=== onScanFailed errorCode=$errorCode at ${logTimestampFormat.format(Date())} ===")
             }
         }
 
@@ -236,7 +190,7 @@ class BLEScannerService : Service() {
                 scanCallback = cb
                 scanning = true
                 lastPacketElapsedMs = SystemClock.elapsedRealtime()
-                Log.d(TAG, "startScan: native BLE scan started (unfiltered, balanced) on ${Thread.currentThread().name}")
+                Log.d(TAG, "startScan: native BLE scan started (ODID filter, balanced) on ${Thread.currentThread().name}")
                 workHandler.removeCallbacks(watchdogRunnable)
                 workHandler.postDelayed(watchdogRunnable, WATCHDOG_CHECK_INTERVAL_MS)
             } catch (t: Throwable) {
@@ -280,7 +234,6 @@ class BLEScannerService : Service() {
         val record = result.scanRecord
 
         lastPacketElapsedMs = SystemClock.elapsedRealtime()
-        writeLogLine("${logTimestampFormat.format(Date())} $mac rssi=${result.rssi}")
 
         val map: WritableMap = Arguments.createMap()
         map.putString("mac", mac)
