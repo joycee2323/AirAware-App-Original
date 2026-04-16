@@ -78,12 +78,6 @@ export const useDroneStore = create<DroneStore>((set) => ({
         hasSystem: data.hasSystem || existing?.hasSystem,
       };
 
-      console.log('[DroneStore]', mac, {
-        inHeading: data.heading, inSpeed: data.speedHoriz,
-        mergedHeading: merged.heading, mergedSpeed: merged.speedHoriz,
-        hasLocation: merged.hasLocation,
-      });
-
       return {
         bleDrones: { ...state.bleDrones, [mac]: merged },
       };

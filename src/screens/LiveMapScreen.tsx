@@ -3,6 +3,7 @@ import {
   View, Text, TextInput, StyleSheet, TouchableOpacity, Platform, PermissionsAndroid,
 } from 'react-native';
 import MapboxGL from '@rnmapbox/maps';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useDroneStore } from '../store/droneStore';
 import { useAuthStore } from '../store/authStore';
 import { createWebSocket, api } from '../services/api';
@@ -12,6 +13,7 @@ import { startBleScanning, stopBleScanning } from '../services/bleScanner';
 import * as Location from 'expo-location';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const NICKNAMES_STORAGE_KEY = 'drone_nicknames';
 
 export default function LiveMapScreen() {
   const colors = useTheme();
@@ -23,6 +25,25 @@ export default function LiveMapScreen() {
   const nearbyNodeCount = useDroneStore(s => Object.keys(s.nearbyNodes).length);
 
   const [nicknames, setNicknames] = useState<Record<string, string>>({});
+  const nicknamesLoaded = useRef(false);
+
+  useEffect(() => {
+    AsyncStorage.getItem(NICKNAMES_STORAGE_KEY)
+      .then(raw => {
+        if (raw) {
+          try { setNicknames(JSON.parse(raw)); }
+          catch (err) { console.warn('Failed to parse stored nicknames:', err); }
+        }
+      })
+      .catch(err => console.warn('Failed to load nicknames:', err))
+      .finally(() => { nicknamesLoaded.current = true; });
+  }, []);
+
+  useEffect(() => {
+    if (!nicknamesLoaded.current) return;
+    AsyncStorage.setItem(NICKNAMES_STORAGE_KEY, JSON.stringify(nicknames))
+      .catch(err => console.warn('Failed to save nicknames:', err));
+  }, [nicknames]);
 
   // Actions are stable references — selecting them individually avoids
   // subscribing to unrelated state changes.
@@ -217,7 +238,6 @@ export default function LiveMapScreen() {
               .map((d: any) => {
                 const id = d.mac || d.uas_id;
                 const hdg = d.heading ?? d.last_heading ?? 0;
-                console.log('[DroneFeature]', d.uasId || d.uas_id || id, { heading: d.heading, last_heading: d.last_heading, resolved: hdg });
                 return {
                   type: 'Feature' as const,
                   id,
@@ -292,7 +312,6 @@ export default function LiveMapScreen() {
                   },
                 };
               });
-            console.log('[PilotFeatures]', JSON.stringify(features));
             return { type: 'FeatureCollection' as const, features };
           })()}
         >

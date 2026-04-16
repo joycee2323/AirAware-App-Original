@@ -67,12 +67,6 @@ function parseLocation(msg: Uint8Array): Partial<OdidDetection> {
   const speedHoriz = speedMult ? (speedRaw * 0.75 + 63.75) : (speedRaw * 0.25);
   const heading = dirMod + (ewSeg * 180);
 
-  console.log('[ODID location]', {
-    b1: msg[1]?.toString(16), b2: msg[2]?.toString(16), b3: msg[3],
-    ewSeg, dirMod, speedMult, speedRaw,
-    heading, speedHoriz, lat, lon, altGeo,
-  });
-
   if (lat === 0 && lon === 0) return { hasLocation: false };
 
   return { hasLocation: true, lat, lon, altGeo, speedHoriz, heading, status };
@@ -148,31 +142,14 @@ export function parseOdidAdvertisement(
       data[i] = binary.charCodeAt(i);
     }
 
-    console.log('[ODID bytes]', {
-      len: data.length,
-      b0: data[0]?.toString(16),
-      b1: data[1]?.toString(16),
-      b2: data[2]?.toString(16),
-    });
-
     // BLE ODID layout: [app_code 0x0D][counter][25-byte message]
-    if (data.length < 27) {
-      console.log('[ODID reject] too short:', data.length);
-      return null;
-    }
-    if (data[0] !== ODID_APP_CODE) {
-      console.log('[ODID reject] bad app code:', data[0]?.toString(16), 'expected 0d');
-      return null;
-    }
+    if (data.length < 27) return null;
+    if (data[0] !== ODID_APP_CODE) return null;
 
     // Skip app code + counter
     const msg = data.slice(2);
-    const msgType = (msg[0] >> 4) & 0x0F;
-    const result = parseOdidMessage(msg);
-    console.log('[ODID message]', { msgType, resultKeys: result ? Object.keys(result) : null });
-    return result;
-  } catch (e) {
-    console.log('[ODID error]', e);
+    return parseOdidMessage(msg);
+  } catch {
     return null;
   }
 }

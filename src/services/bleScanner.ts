@@ -11,7 +11,6 @@ const { BLEScanner } = NativeModules as {
     removeListeners: (count: number) => void;
   };
 };
-console.log('[BLE] NativeModules.BLEScanner:', BLEScanner);
 
 interface NativeScanResult {
   mac: string;
@@ -91,7 +90,6 @@ export async function startBleScanning(
   onDetection: (det: Partial<OdidDetection> & { mac: string; rssi: number }) => void,
   onNearbyNode?: (mac: string, rssi: number, apiKey?: string) => void,
 ): Promise<void> {
-  console.log('[BLE] startBleScanning called');
   if (scanning) return;
   if (Platform.OS !== 'android' || !BLEScanner) {
     console.warn('[BLE] Native BLEScanner module unavailable');
@@ -107,13 +105,6 @@ export async function startBleScanning(
     const mac = device.mac;
 
     if (isAirAwareNode(mac)) {
-      console.log('[BLE AirAware]', mac, JSON.stringify({
-        name: device.name,
-        manufacturerData: device.manufacturerData,
-        serviceData: device.serviceData,
-        serviceUUIDs: device.serviceUUIDs,
-        rawScanRecord: device.rawScanRecord,
-      }));
       const macUpper = mac.toUpperCase();
       const apiKey = NODE_API_KEYS[macUpper];
 
@@ -140,9 +131,7 @@ export async function startBleScanning(
     const serviceData = serviceDataMap[ODID_UUID_KEY];
     if (!serviceData) return;
 
-    console.log('[ODID input]', mac, serviceData);
     const parsed = parseOdidAdvertisement(mac, rssi, serviceData);
-    console.log('[ODID parsed]', mac, parsed);
     if (!parsed) return;
 
     if (parsed.uasId === 'DroneScout Bridge') return;
