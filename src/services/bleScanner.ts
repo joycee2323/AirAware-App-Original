@@ -52,21 +52,16 @@ export interface DiscoveredNode {
 
 const discoveredNodes = new Map<string, DiscoveredNode>();
 
-// ODID messages arrive in separate ads: BasicId carries uasId, Location carries lat/lon,
-// System carries operator lat/lon. We merge per source MAC to reconstruct a full detection.
-interface OdidMergeState {
-  uasId?: string;
-  lat?: number;
-  lon?: number;
-  altGeo?: number;
-  speedHoriz?: number;
-  heading?: number;
-  opLat?: number;
-  opLon?: number;
-  updatedAt: number;
-}
-const ODID_MERGE_TTL_MS = 30_000;
-const mergeBySource = new Map<string, OdidMergeState>();
+// DJI (and most drones in practice) broadcast BasicId — the only message that
+// carries uasId — every ~30s, while Location and System broadcast every ~2s
+// without a uasId. To attribute position-only messages to a drone, we remember
+// the most recently seen uasId on each source (relay) MAC, and apply it to
+// subsequent Location/System messages on that MAC within this TTL. When two
+// drones share one node, attribution follows whichever broadcast BasicId last,
+// so positions will flicker between the two — accepted tradeoff until DJI
+// provides a stronger attribution signal.
+const ATTRIBUTION_TTL_MS = 60_000;
+const mergeBySource = new Map<string, { uasId: string; lastBasicIdAt: number }>();
 
 export function getDiscoveredNodes(): Map<string, DiscoveredNode> {
   return discoveredNodes;
@@ -121,68 +116,64 @@ export async function startBleScanning(
 
     if (parsed.uasId === 'DroneScout Bridge') return;
 
-    // Can't attribute a message with no UAS ID — two drones relayed through
-    // one node would collapse into each other's merge state. A subsequent
-    // BasicId or Pack from the same drone will carry the fields we need.
-    console.log(`[bleScan] uasId-guard: ${parsed?.uasId ? 'PASS' : 'BLOCKED'}`);
-    if (!parsed.uasId) return;
-
     const sourceMacUpper = mac.toUpperCase();
 
-    // Merge with prior parses for this UAS ID — BasicId, Location, and System
-    // each only carry some of the fields. Keyed by uasId (not source MAC) so
-    // multiple drones relayed through one node stay separate.
-    const prev = mergeBySource.get(parsed.uasId);
-    const stale = !prev || (now - prev.updatedAt) > ODID_MERGE_TTL_MS;
-    const merged: OdidMergeState = {
-      ...(stale ? {} : prev),
-      uasId: parsed.uasId,
-      ...(parsed.hasLocation && typeof parsed.lat === 'number' && typeof parsed.lon === 'number'
-        ? { lat: parsed.lat, lon: parsed.lon, altGeo: parsed.altGeo,
-            speedHoriz: parsed.speedHoriz, heading: parsed.heading }
-        : {}),
-      ...(parsed.hasSystem ? { opLat: parsed.opLat, opLon: parsed.opLon } : {}),
-      updatedAt: now,
-    };
-    mergeBySource.set(parsed.uasId, merged);
-
-    // Fire a notification the first time we see this UAS ID (fresh cache entry).
-    // droneNotifier dedupes per session — repeat sightings are ignored there too.
-    if (stale) {
-      void notifyNewDrone(parsed.uasId);
+    // Attribute the uasId. BasicId/Pack messages carry their own uasId and
+    // refresh the attribution for this source. Location/System messages have
+    // no uasId of their own — inherit the most recent one on this source MAC
+    // if it's within the TTL.
+    let effectiveUasId: string | undefined;
+    if (parsed.uasId) {
+      effectiveUasId = parsed.uasId;
+      const prev = mergeBySource.get(sourceMacUpper);
+      const isNewSighting = !prev
+        || prev.uasId !== parsed.uasId
+        || (now - prev.lastBasicIdAt) > ATTRIBUTION_TTL_MS;
+      mergeBySource.set(sourceMacUpper, { uasId: parsed.uasId, lastBasicIdAt: now });
+      if (isNewSighting) {
+        void notifyNewDrone(parsed.uasId);
+      }
+    } else {
+      const prev = mergeBySource.get(sourceMacUpper);
+      if (prev && (now - prev.lastBasicIdAt) <= ATTRIBUTION_TTL_MS) {
+        effectiveUasId = prev.uasId;
+      }
     }
 
-    console.log(`[bleScan] onDetection uasId=${parsed.uasId} lat=${parsed.lat} lon=${parsed.lon}`);
+    console.log(`[bleScan] uasId-guard: ${effectiveUasId ? 'PASS' : 'BLOCKED'} (parsed=${parsed.uasId ?? 'none'} attributed=${effectiveUasId ?? 'none'})`);
+    if (!effectiveUasId) return;
+
+    console.log(`[bleScan] onDetection uasId=${effectiveUasId} lat=${parsed.lat} lon=${parsed.lon}`);
     onDetection({
       mac,
-      uasId: parsed.uasId,
       rssi,
       lastSeen: now,
       sourceMac: sourceMacUpper,
       ...parsed,
+      uasId: effectiveUasId,
     });
 
     // Only queue uploads from AirAware-OUI sources. Drones broadcasting
     // their own ODID directly aren't node-attributable, so the backend
-    // would 404 on /nodes/<droneMac>/detections.
+    // would 404 on /nodes/<droneMac>/detections. Use the current message's
+    // position fields (parsed) with the attributed uasId.
     if (
       isAirAwareNode(sourceMacUpper) &&
-      merged.uasId &&
-      typeof merged.lat === 'number' &&
-      typeof merged.lon === 'number' &&
-      !(merged.lat === 0 && merged.lon === 0)
+      typeof parsed.lat === 'number' &&
+      typeof parsed.lon === 'number' &&
+      !(parsed.lat === 0 && parsed.lon === 0)
     ) {
       queueDetection({
         sourceMac: sourceMacUpper,
-        uasId: merged.uasId,
-        lat: merged.lat,
-        lon: merged.lon,
-        altGeo: merged.altGeo,
+        uasId: effectiveUasId,
+        lat: parsed.lat,
+        lon: parsed.lon,
+        altGeo: parsed.altGeo,
         rssi,
-        opLat: merged.opLat,
-        opLon: merged.opLon,
-        speedHoriz: merged.speedHoriz,
-        heading: merged.heading,
+        opLat: parsed.opLat,
+        opLon: parsed.opLon,
+        speedHoriz: parsed.speedHoriz,
+        heading: parsed.heading,
         timestamp: now,
       });
     }
