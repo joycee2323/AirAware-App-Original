@@ -92,7 +92,6 @@ export async function startBleScanning(
     const now = Date.now();
     const mac = device.mac;
     const serviceDataMap = device.serviceData;
-    console.log(`[bleScan] event mac=${mac} svc=${Object.keys(serviceDataMap || {}).join(',')}`);
 
     if (isAirAwareNode(mac)) {
       const macUpper = mac.toUpperCase();
@@ -111,7 +110,6 @@ export async function startBleScanning(
     if (!serviceData) return;
 
     const parsed = parseOdidAdvertisement(mac, rssi, serviceData);
-    console.log(`[bleScan] parsed msgType=${parsed?.msgType ?? 'null'} uasId=${parsed?.uasId ?? 'none'} hasBasic=${parsed?.hasBasicId} hasLoc=${parsed?.hasLocation} lat=${parsed?.lat} lon=${parsed?.lon}`);
     if (!parsed) return;
 
     if (parsed.uasId === 'DroneScout Bridge') return;
@@ -140,10 +138,8 @@ export async function startBleScanning(
       }
     }
 
-    console.log(`[bleScan] uasId-guard: ${effectiveUasId ? 'PASS' : 'BLOCKED'} (parsed=${parsed.uasId ?? 'none'} attributed=${effectiveUasId ?? 'none'})`);
     if (!effectiveUasId) return;
 
-    console.log(`[bleScan] onDetection uasId=${effectiveUasId} lat=${parsed.lat} lon=${parsed.lon}`);
     onDetection({
       mac,
       rssi,

@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  View, Text, TextInput, StyleSheet, TouchableOpacity, Platform, PermissionsAndroid,
+  View, Text, TextInput, StyleSheet, TouchableOpacity, Platform, PermissionsAndroid, AppState,
 } from 'react-native';
 import MapboxGL from '@rnmapbox/maps';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native';
 import { useDroneStore } from '../store/droneStore';
 import { useAuthStore } from '../store/authStore';
 import { createWebSocket, api } from '../services/api';
@@ -66,6 +67,8 @@ export default function LiveMapScreen() {
   const setMode = useDroneStore(s => s.setMode);
 
   const [activeDeployment, setActiveDeployment] = useState<any>(null);
+  const activeDeploymentRef = useRef<any>(null);
+  useEffect(() => { activeDeploymentRef.current = activeDeployment; }, [activeDeployment]);
   const [nodes, setNodes] = useState<any[]>([]);
   const nodesRef = useRef<any[]>([]);
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
@@ -79,7 +82,6 @@ export default function LiveMapScreen() {
 
   const allDrones = { ...bleDrones, ...backendDrones };
   const droneList = Object.values(allDrones);
-  console.log(`[LiveMap] render droneList.len=${droneList.length} keys=[${droneList.map((d: any) => d.uasId || d.mac).join(',')}]`);
 
   const sendHeartbeat = useCallback(async (mac: string) => {
     const deviceId = getDeviceIdFromMac(mac);
@@ -135,6 +137,31 @@ export default function LiveMapScreen() {
     heartbeatTimers.current.set(mac, timer);
   }, [sendHeartbeat]);
 
+  // Refetch the node list for the active deployment. Used by the initial load,
+  // focus/foreground resume, and unknown-node WS messages. Accepts an optional
+  // deployment arg for the first call (before setActiveDeployment has flushed
+  // into the ref).
+  const refetchNodes = useCallback(async (dep?: any) => {
+    const active = dep ?? activeDeploymentRef.current;
+    if (!active) return;
+    try {
+      const nodeList = await api.getNodes(active.id);
+      setNodes(nodeList);
+    } catch (err) {
+      console.warn('refetchNodes failed:', err);
+    }
+  }, []);
+
+  // Debounced wrapper for WS-triggered refetches — a burst of NODE_ONLINE
+  // messages (e.g. after a backend restart) coalesces into a single request.
+  const refetchDebounceTimer = useRef<any>(null);
+  const scheduleRefetchNodes = useCallback(() => {
+    if (refetchDebounceTimer.current) clearTimeout(refetchDebounceTimer.current);
+    refetchDebounceTimer.current = setTimeout(() => {
+      void refetchNodes();
+    }, 300);
+  }, [refetchNodes]);
+
   useEffect(() => {
     setMode('backend');
     void fetchNodeRegistry();
@@ -154,8 +181,30 @@ export default function LiveMapScreen() {
       stopBleScanning();
       heartbeatTimers.current.forEach(t => clearInterval(t));
       heartbeatTimers.current.clear();
+      if (refetchDebounceTimer.current) clearTimeout(refetchDebounceTimer.current);
     };
   }, []);
+
+  // Refetch nodes when this screen regains focus (e.g. after the user visits
+  // the Nodes tab and returns, where assignments may have changed).
+  useFocusEffect(
+    useCallback(() => {
+      void refetchNodes();
+    }, [refetchNodes])
+  );
+
+  // Refetch nodes when the app returns from background to foreground — the
+  // WS connection may have dropped heartbeats while suspended.
+  useEffect(() => {
+    let prevState = AppState.currentState;
+    const sub = AppState.addEventListener('change', (state) => {
+      if (prevState !== 'active' && state === 'active') {
+        void refetchNodes();
+      }
+      prevState = state;
+    });
+    return () => sub.remove();
+  }, [refetchNodes]);
 
   const setNickname = useCallback((uasId: string, name: string) => {
     setNicknames(prev => {
@@ -196,8 +245,7 @@ export default function LiveMapScreen() {
         connectWebSocket(active.id);
         const dets = await api.getDetections(active.id);
         dets.forEach((d: any) => updateBackendDrone(d));
-        const nodeList = await api.getNodes(active.id);
-        setNodes(nodeList);
+        await refetchNodes(active);
       }
     } catch (err) {
       console.warn('Failed to load deployment:', err);
@@ -214,9 +262,23 @@ export default function LiveMapScreen() {
           n.id === msg.node_id ? { ...n, status: 'offline' } : n
         ));
       }
+      if (msg.type === 'NODE_ONLINE') {
+        const existing = nodesRef.current.find((n: any) => n.id === msg.node_id);
+        if (existing) {
+          setNodes(prev => prev.map((n: any) =>
+            n.id === msg.node_id
+              ? { ...n, status: 'online', last_seen: new Date().toISOString() }
+              : n
+          ));
+        } else {
+          // Unknown node — WS payload has only node_id, not a full record.
+          // Refetch to hydrate (debounced to coalesce bursts).
+          scheduleRefetchNodes();
+        }
+      }
     });
     wsRef.current = ws;
-  }, []);
+  }, [scheduleRefetchNodes]);
 
   const s = styles(colors);
 
