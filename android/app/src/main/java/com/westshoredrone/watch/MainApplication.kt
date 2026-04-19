@@ -1,4 +1,4 @@
-package com.westshoredrone.airaware
+package com.westshoredrone.watch
 
 import android.app.Application
 import android.content.res.Configuration

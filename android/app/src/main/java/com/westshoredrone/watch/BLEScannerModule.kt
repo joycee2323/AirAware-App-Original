@@ -1,4 +1,4 @@
-package com.westshoredrone.airaware
+package com.westshoredrone.watch
 
 import android.Manifest
 import android.annotation.SuppressLint

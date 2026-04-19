@@ -41,9 +41,9 @@
         <action android:name="android.intent.action.VIEW"/>
         <category android:name="android.intent.category.DEFAULT"/>
         <category android:name="android.intent.category.BROWSABLE"/>
-        <data android:scheme="airaware"/>
-        <data android:scheme="com.westshoredrone.airaware"/>
-        <data android:scheme="exp+airaware"/>
+        <data android:scheme="westshorewatch"/>
+        <data android:scheme="com.westshoredrone.watch"/>
+        <data android:scheme="exp+westshorewatch"/>
       </intent-filter>
     </activity>
   </application>

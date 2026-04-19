@@ -1,4 +1,4 @@
-package com.westshoredrone.airaware
+package com.westshoredrone.watch
 
 import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.NativeModule

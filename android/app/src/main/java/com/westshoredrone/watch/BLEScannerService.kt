@@ -1,4 +1,4 @@
-package com.westshoredrone.airaware
+package com.westshoredrone.watch
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -307,8 +307,8 @@ class BLEScannerService : Service() {
         }
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("AirAware scanning")
-            .setContentText("Watching for nearby drones and AirAware nodes")
+            .setContentTitle("Westshore Watch scanning")
+            .setContentText("Watching for nearby drones and Westshore Watch nodes")
             .setSmallIcon(applicationInfo.icon)
             .setOngoing(true)
             .setContentIntent(contentPI)
@@ -350,10 +350,10 @@ class BLEScannerService : Service() {
         if (existing != null) return
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "AirAware BLE scanning",
+            "Westshore Watch BLE scanning",
             NotificationManager.IMPORTANCE_DEFAULT
         ).apply {
-            description = "Keeps the app scanning for drones and AirAware nodes in the background"
+            description = "Keeps the app scanning for drones and Westshore Watch nodes in the background"
             setShowBadge(false)
         }
         nm.createNotificationChannel(channel)
@@ -361,13 +361,13 @@ class BLEScannerService : Service() {
 
     companion object {
         private const val TAG = "BLEScannerService"
-        const val ACTION_START = "com.westshoredrone.airaware.action.START_BLE"
-        const val ACTION_STOP = "com.westshoredrone.airaware.action.STOP_BLE"
+        const val ACTION_START = "com.westshoredrone.watch.action.START_BLE"
+        const val ACTION_STOP = "com.westshoredrone.watch.action.STOP_BLE"
         const val EVENT_SCAN_RESULT = "BLEScanResult"
         private const val ODID_SERVICE_UUID = "0000FFFA-0000-1000-8000-00805F9B34FB"
-        private const val CHANNEL_ID = "airaware_ble_scanner_v2"
+        private const val CHANNEL_ID = "westshore_ble_scanner_v2"
         private const val NOTIFICATION_ID = 4471
-        private const val WAKE_LOCK_TAG = "AirAware::BLEScannerService"
+        private const val WAKE_LOCK_TAG = "WestshoreWatch::BLEScannerService"
         // Restart only if no packets have arrived for this long (silence watchdog).
         private const val WATCHDOG_SILENCE_THRESHOLD_MS = 30_000L
         // How often the watchdog checks for silence.

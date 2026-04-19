@@ -94,9 +94,9 @@ packagingOptions {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace 'com.westshoredrone.airaware'
+    namespace 'com.westshoredrone.watch'
     defaultConfig {
-        applicationId 'com.westshoredrone.airaware'
+        applicationId 'com.westshoredrone.watch'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
