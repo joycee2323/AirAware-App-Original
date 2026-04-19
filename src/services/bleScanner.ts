@@ -69,7 +69,7 @@ export function getDiscoveredNodes(): Map<string, DiscoveredNode> {
 
 let onNodeNearby: ((mac: string, rssi: number) => void) | null = null;
 
-function isWestshore WatchNode(mac: string): boolean {
+function isWestshoreWatchNode(mac: string): boolean {
   const upper = mac.toUpperCase();
   return upper.startsWith('98:A3:16:7D') || upper.startsWith('38:44:BE');
 }
@@ -93,7 +93,7 @@ export async function startBleScanning(
     const mac = device.mac;
     const serviceDataMap = device.serviceData;
 
-    if (isWestshore WatchNode(mac)) {
+    if (isWestshoreWatchNode(mac)) {
       const macUpper = mac.toUpperCase();
       discoveredNodes.set(macUpper, {
         mac: macUpper,
@@ -154,7 +154,7 @@ export async function startBleScanning(
     // would 404 on /nodes/<droneMac>/detections. Use the current message's
     // position fields (parsed) with the attributed uasId.
     if (
-      isWestshore WatchNode(sourceMacUpper) &&
+      isWestshoreWatchNode(sourceMacUpper) &&
       typeof parsed.lat === 'number' &&
       typeof parsed.lon === 'number' &&
       !(parsed.lat === 0 && parsed.lon === 0)
