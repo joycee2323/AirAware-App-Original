@@ -1,6 +1,6 @@
 import * as SecureStore from 'expo-secure-store';
 
-const BASE = 'https://airaware-backend-6jz6.onrender.com/api';
+const BASE = 'https://api.westshoredrone.com/api';
 
 async function getToken(): Promise<string | null> {
   return SecureStore.getItemAsync('auth_token');
@@ -101,7 +101,7 @@ export const api = {
 
 // WebSocket connection
 export function createWebSocket(deploymentId: string, onMessage: (msg: any) => void) {
-  const WS_BASE = 'wss://airaware-backend-6jz6.onrender.com';
+  const WS_BASE = 'wss://api.westshoredrone.com';
   const ws = new WebSocket(WS_BASE);
 
   ws.onopen = async () => {
