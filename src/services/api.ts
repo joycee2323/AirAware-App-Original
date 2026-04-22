@@ -127,10 +127,13 @@ export const api = {
 
 // WebSocket connection
 export function createWebSocket(deploymentId: string, onMessage: (msg: any) => void) {
-  const WS_BASE = 'wss://api.westshoredrone.com';
+  // Backend mounts ws.Server at path '/ws' (server.js:17). Connecting to the
+  // bare host fails the upgrade handshake silently.
+  const WS_BASE = 'wss://api.westshoredrone.com/ws';
   const ws = new WebSocket(WS_BASE);
 
   ws.onopen = async () => {
+    console.info('[ws] connected to', WS_BASE);
     const token = await getToken();
     ws.send(JSON.stringify({ type: 'AUTH', token }));
     ws.send(JSON.stringify({ type: 'SUBSCRIBE', deployment_id: deploymentId }));
@@ -141,6 +144,17 @@ export function createWebSocket(deploymentId: string, onMessage: (msg: any) => v
       const msg = JSON.parse(e.data);
       onMessage(msg);
     } catch {}
+  };
+
+  ws.onerror = (e: any) => {
+    const reason = e?.message ?? e?.type ?? 'unknown';
+    console.warn('[ws] error:', reason);
+  };
+
+  ws.onclose = (e: any) => {
+    const code = e?.code ?? 'unknown';
+    const reason = e?.reason || 'no reason given';
+    console.warn(`[ws] closed: code=${code} reason=${reason}`);
   };
 
   return ws;
