@@ -68,15 +68,14 @@ export interface DiscoveredNode {
 
 const discoveredNodes = new Map<string, DiscoveredNode>();
 
-// DJI (and most drones in practice) broadcast BasicId — the only message that
-// carries uasId — every ~30s, while Location and System broadcast every ~2s
-// without a uasId. To attribute position-only messages to a drone, we remember
-// the most recently seen uasId on each source (relay) MAC, and apply it to
-// subsequent Location/System messages on that MAC within this TTL. When two
-// drones share one node, attribution follows whichever broadcast BasicId last,
-// so positions will flicker between the two — accepted tradeoff until DJI
-// provides a stronger attribution signal.
-const ATTRIBUTION_TTL_MS = 60_000;
+// Firmware now emits basic_id every cycle (handle 0, option A) AND a
+// self-identifying ODID Message Pack every cycle (handle 1, option C). TTL
+// only needs to cover the ~50ms intra-burst gap between a basic_id and its
+// sibling Location on the legacy path; 200ms gives ~4x headroom for BLE
+// scanner batching/reorder jitter. Pack-parsed ads (msgType 0xF) bypass
+// this inheritance path entirely — see below.
+const ATTRIBUTION_TTL_MS = 200;
+const ODID_MSG_PACK = 0xF;
 const mergeBySource = new Map<string, { uasId: string; lastBasicIdAt: number }>();
 
 export function getDiscoveredNodes(): Map<string, DiscoveredNode> {
@@ -132,12 +131,23 @@ export async function startBleScanning(
 
     const sourceMacUpper = mac.toUpperCase();
 
-    // Attribute the uasId. BasicId/Pack messages carry their own uasId and
-    // refresh the attribution for this source. Location/System messages have
-    // no uasId of their own — inherit the most recent one on this source MAC
-    // if it's within the TTL.
+    // Attribute the uasId. Three paths:
+    //   (1) Pack (msgType 0xF): self-identifying, skip sourceMac attribution.
+    //   (2) Legacy BasicId: refresh attribution for this sourceMac + TTL.
+    //   (3) Legacy Location/System: inherit the most recent uasId on this
+    //       sourceMac within the (tightened) TTL window.
     let effectiveUasId: string | undefined;
-    if (parsed.uasId) {
+    if (parsed.msgType === ODID_MSG_PACK) {
+      if (parsed.uasId) {
+        effectiveUasId = parsed.uasId;
+        const prev = mergeBySource.get(sourceMacUpper);
+        // Still fire first-sighting notifications on pack arrivals, but DO
+        // NOT write to mergeBySource — legacy-path inheritance state is
+        // independent and shouldn't be influenced by pack emission.
+        const isNewSighting = !prev || prev.uasId !== parsed.uasId;
+        if (isNewSighting) void notifyNewDrone(parsed.uasId);
+      }
+    } else if (parsed.uasId) {
       effectiveUasId = parsed.uasId;
       const prev = mergeBySource.get(sourceMacUpper);
       const isNewSighting = !prev

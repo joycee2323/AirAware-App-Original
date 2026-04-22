@@ -176,10 +176,16 @@ class BLEScannerService : Service() {
 
         val workHandler = handler ?: return
 
+        // setLegacy(false) makes the scanner return BOTH legacy and extended
+        // advertisements. Default on Android 8+ is true (legacy-only), which
+        // would filter out the firmware's pack advertiser on handle 1
+        // (extended PDU). We rely on the pack emission for self-identifying
+        // multi-drone attribution.
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
             .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
             .setReportDelay(0L)
+            .setLegacy(false)
             .build()
 
         val cb = object : ScanCallback() {
@@ -332,9 +338,23 @@ class BLEScannerService : Service() {
 
         val now = SystemClock.elapsedRealtime()
 
-        // Attribute the uasId: BasicId/Pack carry one and refresh the TTL;
-        // Location/System inherit the most recent one on this source MAC.
-        val effectiveUasId: String? = if (parsed.uasId != null) {
+        // Option C: Pack (msgType 0xF) advertisements are self-identifying —
+        // the firmware (handle 1, extended PDU) emits basic_id + location +
+        // system in one atomic AD. Bypass sourceMac-based attribution entirely
+        // and trust the in-packet uasId. Do not write to attributionBySource
+        // here either; legacy-path inheritance state is independent.
+        val effectiveUasId: String? = if (parsed.msgType == ODID_MSG_PACK) {
+            if (parsed.uasId == null) {
+                Log.i(TAG, "[diag] pack with no uasId — dropped (malformed)")
+                null
+            } else {
+                Log.i(TAG, "[diag] attrib pack sourceMac=$sourceMacUpper uasId=${parsed.uasId}")
+                parsed.uasId
+            }
+        } else if (parsed.uasId != null) {
+            // Legacy per-message path: BasicId carries a uasId and refreshes
+            // the TTL; Location/System inherit the most recent one on this
+            // sourceMac within the tightened TTL window.
             attributionBySource[sourceMacUpper] = Attribution(parsed.uasId, now)
             // [diag] TEMPORARY — revert after triage.
             Log.i(TAG, "[diag] attrib set sourceMac=$sourceMacUpper uasId=${parsed.uasId}")
@@ -486,9 +506,19 @@ class BLEScannerService : Service() {
         private const val WATCHDOG_SILENCE_THRESHOLD_MS = 30_000L
         // How often the watchdog checks for silence.
         private const val WATCHDOG_CHECK_INTERVAL_MS = 5_000L
-        // How long a BasicId attribution is reused for follow-up Location/System
-        // messages without their own uasId. Mirrors bleScanner.ts.
-        private const val ATTRIBUTION_TTL_MS = 60_000L
+        // How long a BasicId attribution is reused for legacy-path follow-up
+        // Location/System messages without their own uasId. Firmware now emits
+        // basic_id every cycle (option A in ble_relay.c), so a valid inherit
+        // only needs to cover the ~50ms intra-burst gap. 200ms gives ~4x
+        // headroom for Android BluetoothLeScanner batching/reorder jitter
+        // without letting stale attributions leak across multi-drone bursts.
+        // Irrelevant for pack-parsed ads (option C) — those are self-
+        // identifying and skip this path entirely.
+        private const val ATTRIBUTION_TTL_MS = 200L
+
+        // ODID Message Pack msgType — matches ODID_MSG_PACK in
+        // C6-Firmware/main/odid_decoder.h and OdidParser.kt.
+        private const val ODID_MSG_PACK = 0xF
 
         // Live reference to the running service so the native module can push
         // config updates into its uploader without restarting the service.
