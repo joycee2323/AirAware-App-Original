@@ -195,7 +195,10 @@ class DetectionUploader(private val handler: Handler) {
 
     companion object {
         private const val TAG = "DetectionUploader"
-        private const val FLUSH_INTERVAL_MS = 2_000L
+        // 500ms flush — tuned for perceived Live Map responsiveness. Backend
+        // coalescer at 3s handles duplicate POSTs cleanly, so the higher POST
+        // frequency doesn't translate into more WS broadcast churn.
+        private const val FLUSH_INTERVAL_MS = 500L
         private const val MAX_PER_NODE = 200
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
     }
