@@ -119,9 +119,30 @@ export const useDroneStore = create<DroneStore>((set) => ({
 
   updateBackendDrone: (drone) => {
     const coerced = coerceBackendNumerics(drone);
-    set(state => ({
-      backendDrones: { ...state.backendDrones, [coerced.uas_id]: coerced },
-    }));
+    set(state => {
+      const uasId = coerced.uas_id;
+      const existing = state.backendDrones[uasId] ?? {};
+      const existingPath = existing.path ?? [];
+      const hasCoords =
+        typeof coerced.last_lat === 'number' && typeof coerced.last_lon === 'number';
+      const nextPath = hasCoords
+        ? [
+            ...existingPath,
+            {
+              lat: coerced.last_lat,
+              lon: coerced.last_lon,
+              alt: coerced.last_altitude,
+              ts: new Date().toISOString(),
+            },
+          ].slice(-200)
+        : existingPath;
+      return {
+        backendDrones: {
+          ...state.backendDrones,
+          [uasId]: { ...existing, ...coerced, path: nextPath },
+        },
+      };
+    });
   },
 
   updateNearbyNode: (mac, rssi) => {
