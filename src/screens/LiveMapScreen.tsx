@@ -274,7 +274,13 @@ export default function LiveMapScreen() {
         setActiveDeployment(active);
         connectWebSocket(active.id);
         const dets = await api.getDetections(active.id);
-        dets.forEach((d: any) => updateBackendDrone(d));
+        // Filter to the last 60s so stale detections from earlier in the
+        // deployment don't hydrate as live markers. Matches the dashboard
+        // hydrate path (commit 9e0cf92).
+        const cutoff = Date.now() - 60_000;
+        dets
+          .filter((d: any) => d.last_seen && new Date(d.last_seen).getTime() > cutoff)
+          .forEach((d: any) => updateBackendDrone(d));
         await refetchNodes(active);
       }
     } catch (err) {

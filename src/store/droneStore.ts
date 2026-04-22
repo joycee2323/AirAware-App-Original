@@ -35,6 +35,28 @@ interface DroneStore {
   updateNearbyNode: (mac: string, rssi: number) => void;
 }
 
+// Top-level DECIMAL fields come through the pg driver as strings to preserve
+// precision. @rnmapbox/maps requires numeric coordinates per RFC 7946 (unlike
+// Leaflet on the web dashboard, which parses strings via parseFloat), so we
+// coerce at the store boundary. Path coords do NOT need this — json_build_object
+// in the backend query converts DECIMAL → JSON number natively.
+const BACKEND_NUMERIC_FIELDS = [
+  'last_lat', 'last_lon', 'last_altitude',
+  'last_speed', 'last_heading',
+  'op_lat', 'op_lon',
+] as const;
+
+function coerceBackendNumerics(drone: any): any {
+  const next = { ...drone };
+  for (const f of BACKEND_NUMERIC_FIELDS) {
+    const v = next[f];
+    if (v === null || v === undefined) continue;
+    const n = Number(v);
+    next[f] = Number.isFinite(n) ? n : null;
+  }
+  return next;
+}
+
 export const useDroneStore = create<DroneStore>((set) => ({
   bleDrones: {},
   backendDrones: {},
@@ -89,11 +111,18 @@ export const useDroneStore = create<DroneStore>((set) => ({
 
   clearBleDrones: () => set({ bleDrones: {} }),
 
-  setBackendDrones: (drones) => set({ backendDrones: drones }),
+  setBackendDrones: (drones) => {
+    const coerced: Record<string, any> = {};
+    for (const k of Object.keys(drones)) coerced[k] = coerceBackendNumerics(drones[k]);
+    set({ backendDrones: coerced });
+  },
 
-  updateBackendDrone: (drone) => set(state => ({
-    backendDrones: { ...state.backendDrones, [drone.uas_id]: drone },
-  })),
+  updateBackendDrone: (drone) => {
+    const coerced = coerceBackendNumerics(drone);
+    set(state => ({
+      backendDrones: { ...state.backendDrones, [coerced.uas_id]: coerced },
+    }));
+  },
 
   updateNearbyNode: (mac, rssi) => {
     set(state => ({
