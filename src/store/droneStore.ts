@@ -167,15 +167,38 @@ export const useDroneStore = create<DroneStore>((set) => ({
   },
 }));
 
-const DRONE_STALE_MS = 30000;
-const CLEANUP_INTERVAL_MS = 10000;
+const BLE_DRONE_STALE_MS = 30_000;
+// Matches the web dashboard's DRONE_TIMEOUT_MS (Dashboard.jsx:5). Keeping
+// the constant aligned across platforms means a drone evicts at the same
+// wall-clock moment on mobile and desktop.
+const BACKEND_DRONE_STALE_MS = 60_000;
+const CLEANUP_INTERVAL_MS = 10_000;
 
 setInterval(() => {
   const now = Date.now();
-  const { bleDrones, removeDrone } = useDroneStore.getState();
-  for (const uasId of Object.keys(bleDrones)) {
-    if (now - bleDrones[uasId].lastSeen > DRONE_STALE_MS) {
-      removeDrone(uasId);
+  const state = useDroneStore.getState();
+
+  // BLE sweep — guest-mode local detections, keyed on numeric lastSeen.
+  for (const uasId of Object.keys(state.bleDrones)) {
+    if (now - state.bleDrones[uasId].lastSeen > BLE_DRONE_STALE_MS) {
+      state.removeDrone(uasId);
     }
   }
+
+  // Backend sweep — authenticated detections keyed on last_seen (ISO string
+  // from Postgres). Rebuild the map once per interval rather than calling
+  // set() per-drone to minimize re-renders; only commit when something was
+  // actually evicted.
+  const nextBackend: Record<string, any> = {};
+  let changed = false;
+  for (const uasId of Object.keys(state.backendDrones)) {
+    const d = state.backendDrones[uasId];
+    const lastSeenMs = d.last_seen ? new Date(d.last_seen).getTime() : 0;
+    if (lastSeenMs && now - lastSeenMs > BACKEND_DRONE_STALE_MS) {
+      changed = true;
+      continue;
+    }
+    nextBackend[uasId] = d;
+  }
+  if (changed) useDroneStore.setState({ backendDrones: nextBackend });
 }, CLEANUP_INTERVAL_MS);
