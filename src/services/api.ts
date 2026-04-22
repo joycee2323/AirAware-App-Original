@@ -125,37 +125,148 @@ export const api = {
   },
 };
 
-// WebSocket connection
-export function createWebSocket(deploymentId: string, onMessage: (msg: any) => void) {
-  // Backend mounts ws.Server at path '/ws' (server.js:17). Connecting to the
-  // bare host fails the upgrade handshake silently.
-  const WS_BASE = 'wss://api.westshoredrone.com/ws';
-  const ws = new WebSocket(WS_BASE);
+// WebSocket connection — auto-reconnecting with exponential backoff + keepalive.
+//
+// Backend mounts ws.Server at path '/ws' (server.js:17). Render LB idle timeout
+// drops quiet connections around the 2-minute mark (fingerprint of 1006 after
+// ~2min with no app-layer traffic), so we both (a) send a 30s keepalive ping
+// to prevent the drop, and (b) reconnect on any non-1000 close.
+//
+// AUTH + SUBSCRIBE are re-sent on every successful onopen, so reconnects
+// naturally restore the deployment subscription on the new socket instance.
 
-  ws.onopen = async () => {
-    console.info('[ws] connected to', WS_BASE);
-    const token = await getToken();
-    ws.send(JSON.stringify({ type: 'AUTH', token }));
-    ws.send(JSON.stringify({ type: 'SUBSCRIBE', deployment_id: deploymentId }));
+export type WsStatus = 'connecting' | 'connected' | 'reconnecting' | 'closed';
+
+export interface ReconnectingWebSocket {
+  close(): void;
+  status(): WsStatus;
+}
+
+interface CreateWebSocketOptions {
+  // Called after a reconnect (NOT the first connect). Consumer uses this to
+  // refetch any server state that may have changed while the WS was down.
+  onReconnect?: () => void;
+}
+
+const WS_URL = 'wss://api.westshoredrone.com/ws';
+const KEEPALIVE_INTERVAL_MS = 30_000;
+const BACKOFF_STEPS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
+const BACKOFF_JITTER = 0.20;
+
+function nextBackoff(attempt: number): number {
+  const base = BACKOFF_STEPS_MS[Math.min(attempt, BACKOFF_STEPS_MS.length - 1)];
+  const jitter = base * BACKOFF_JITTER * (Math.random() * 2 - 1);
+  return Math.max(250, Math.round(base + jitter));
+}
+
+export function createWebSocket(
+  deploymentId: string,
+  onMessage: (msg: any) => void,
+  opts: CreateWebSocketOptions = {},
+): ReconnectingWebSocket {
+  let ws: WebSocket | null = null;
+  let statusVal: WsStatus = 'connecting';
+  let disposed = false;
+  let hasEverConnected = false;
+  let hadUnexpectedClose = false;
+  let attempt = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+
+  const clearReconnect = () => {
+    if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  };
+  const clearKeepalive = () => {
+    if (keepaliveTimer !== null) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
   };
 
-  ws.onmessage = (e) => {
-    try {
-      const msg = JSON.parse(e.data);
-      onMessage(msg);
-    } catch {}
+  const connect = () => {
+    if (disposed) return;
+    statusVal = hasEverConnected ? 'reconnecting' : 'connecting';
+
+    const socket = new WebSocket(WS_URL);
+    ws = socket;
+
+    socket.onopen = async () => {
+      console.info('[ws] connected to', WS_URL);
+      statusVal = 'connected';
+      attempt = 0;
+      const wasReconnect = hasEverConnected && hadUnexpectedClose;
+      hasEverConnected = true;
+      hadUnexpectedClose = false;
+
+      const token = await getToken();
+      // Guard: another close/reconnect could have fired while awaiting token.
+      if (socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: 'AUTH', token }));
+      socket.send(JSON.stringify({ type: 'SUBSCRIBE', deployment_id: deploymentId }));
+
+      clearKeepalive();
+      keepaliveTimer = setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+          try { socket.send(JSON.stringify({ type: 'PING' })); } catch {}
+        }
+      }, KEEPALIVE_INTERVAL_MS);
+
+      if (wasReconnect && opts.onReconnect) {
+        try { opts.onReconnect(); } catch (err) {
+          console.warn('[ws] onReconnect handler threw:', err);
+        }
+      }
+    };
+
+    socket.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        onMessage(msg);
+      } catch {}
+    };
+
+    socket.onerror = (e: any) => {
+      const reason = e?.message ?? e?.type ?? 'unknown';
+      console.warn('[ws] error:', reason);
+    };
+
+    socket.onclose = (e: any) => {
+      const code = e?.code ?? 0;
+      const reason = e?.reason || 'no reason given';
+      console.warn(`[ws] closed: code=${code} reason=${reason}`);
+      clearKeepalive();
+      ws = null;
+
+      if (disposed) {
+        statusVal = 'closed';
+        return;
+      }
+      // 1000 = normal closure (our explicit dispose or clean shutdown).
+      // Anything else — 1001 going away, 1006 abnormal, 1011 server error,
+      // etc. — triggers reconnect.
+      if (code === 1000) {
+        statusVal = 'closed';
+        return;
+      }
+      hadUnexpectedClose = true;
+      statusVal = 'reconnecting';
+      const delay = nextBackoff(attempt++);
+      console.warn(`[ws] reconnect in ${delay}ms (attempt ${attempt})`);
+      clearReconnect();
+      reconnectTimer = setTimeout(connect, delay);
+    };
   };
 
-  ws.onerror = (e: any) => {
-    const reason = e?.message ?? e?.type ?? 'unknown';
-    console.warn('[ws] error:', reason);
-  };
+  connect();
 
-  ws.onclose = (e: any) => {
-    const code = e?.code ?? 'unknown';
-    const reason = e?.reason || 'no reason given';
-    console.warn(`[ws] closed: code=${code} reason=${reason}`);
+  return {
+    close() {
+      disposed = true;
+      clearReconnect();
+      clearKeepalive();
+      statusVal = 'closed';
+      if (ws && ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+        try { ws.close(1000, 'client dispose'); } catch {}
+      }
+      ws = null;
+    },
+    status: () => statusVal,
   };
-
-  return ws;
 }

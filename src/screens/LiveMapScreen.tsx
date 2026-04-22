@@ -8,7 +8,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import KeepScreenOnToggle from '../components/KeepScreenOnToggle';
 import { useDroneStore } from '../store/droneStore';
 import { useAuthStore } from '../store/authStore';
-import { createWebSocket, api } from '../services/api';
+import { createWebSocket, api, ReconnectingWebSocket } from '../services/api';
 import { useTheme, getDroneColor } from '../theme';
 import { OP_STATUS_AIRBORNE } from '../services/odidParser';
 import { startBleScanning, stopBleScanning } from '../services/bleScanner';
@@ -91,7 +91,7 @@ export default function LiveMapScreen() {
   }, []);
 
   const [selectedDrone, setSelectedDrone] = useState<any>(null);
-  const wsRef = useRef<WebSocket | null>(null);
+  const wsRef = useRef<ReconnectingWebSocket | null>(null);
   const cameraRef = useRef<MapboxGL.Camera>(null);
   const timeouts = useRef<Record<string, any>>({});
 
@@ -312,9 +312,32 @@ export default function LiveMapScreen() {
           scheduleRefetchNodes();
         }
       }
+    }, {
+      // After an unexpected close + reconnect, the WS resumes live updates
+      // but the client's in-memory state is stale for whatever window the
+      // connection was down. Refetch detections + nodes for the active
+      // deployment to close the gap. Guarded on activeDeploymentRef to
+      // avoid racing with deployment teardown.
+      onReconnect: () => {
+        const active = activeDeploymentRef.current;
+        if (!active) return;
+        console.info('[ws] reconnect — refetching detections + nodes for', active.id);
+        (async () => {
+          try {
+            const dets = await api.getDetections(active.id);
+            const cutoff = Date.now() - 60_000;
+            dets
+              .filter((d: any) => d.last_seen && new Date(d.last_seen).getTime() > cutoff)
+              .forEach((d: any) => updateBackendDrone(d));
+          } catch (err) {
+            console.warn('[ws] reconnect detection refetch failed:', err);
+          }
+          void refetchNodes(active);
+        })();
+      },
     });
     wsRef.current = ws;
-  }, [scheduleRefetchNodes]);
+  }, [scheduleRefetchNodes, updateBackendDrone, refetchNodes]);
 
   const s = styles(colors);
 
