@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, RefreshControl,
   ActivityIndicator, Platform, TouchableOpacity, Alert,
+  Modal, TextInput, KeyboardAvoidingView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
@@ -32,6 +33,10 @@ export default function NodesScreen() {
   const [deployments, setDeployments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<any | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameSubmitting, setRenameSubmitting] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -136,6 +141,46 @@ export default function NodesScreen() {
     }
   };
 
+  const openRename = (node: any) => {
+    setRenameTarget(node);
+    setRenameValue(node.name || '');
+    setRenameError(null);
+  };
+
+  const closeRename = () => {
+    if (renameSubmitting) return;
+    setRenameTarget(null);
+    setRenameValue('');
+    setRenameError(null);
+  };
+
+  const submitRename = async () => {
+    if (!renameTarget) return;
+    const trimmed = renameValue.trim();
+    if (!trimmed) {
+      setRenameError('Name cannot be empty.');
+      return;
+    }
+    if (trimmed.length > 64) {
+      setRenameError('Name must be 64 characters or fewer.');
+      return;
+    }
+    setRenameError(null);
+    setRenameSubmitting(true);
+    const targetId = renameTarget.id;
+    try {
+      await api.renameNode(targetId, trimmed);
+      setNodes(prev => prev.map(n => (n.id === targetId ? { ...n, name: trimmed } : n)));
+      setRenameTarget(null);
+      setRenameValue('');
+      load();
+    } catch (err: any) {
+      setRenameError(err?.message || 'Rename failed. Try again.');
+    } finally {
+      setRenameSubmitting(false);
+    }
+  };
+
   const handleUnassign = (node: any) => {
     Alert.alert('Unassign Node', `Remove "${node.name}" from its deployment?`, [
       { text: 'Cancel', style: 'cancel' },
@@ -186,6 +231,14 @@ export default function NodesScreen() {
               <View style={s.nameRow}>
                 <View style={[s.statusDot, { backgroundColor: online ? colors.green : colors.textMuted }]} />
                 <Text style={s.nodeName}>{node.name || `Node ${node.id.slice(0, 8)}`}</Text>
+                <TouchableOpacity
+                  onPress={() => openRename(node)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  style={s.renameBtn}
+                  accessibilityLabel="Rename node"
+                >
+                  <Text style={s.renameIcon}>✎</Text>
+                </TouchableOpacity>
               </View>
               <View style={s.headerRight}>
                 <Text style={[s.statusBadge, { color: online ? colors.green : colors.textMuted }]}>
@@ -269,6 +322,60 @@ export default function NodesScreen() {
           </TouchableOpacity>
         </View>
       )}
+
+      <Modal
+        visible={renameTarget !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={closeRename}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={s.modalBackdrop}
+        >
+          <View style={s.modalCard}>
+            <Text style={s.modalTitle}>RENAME NODE</Text>
+            <TextInput
+              style={s.modalInput}
+              value={renameValue}
+              onChangeText={(t) => {
+                setRenameValue(t);
+                if (renameError) setRenameError(null);
+              }}
+              maxLength={64}
+              autoFocus
+              editable={!renameSubmitting}
+              placeholder="Node name"
+              placeholderTextColor={colors.textMuted}
+              selectionColor={colors.cyan}
+              returnKeyType="done"
+              onSubmitEditing={submitRename}
+            />
+            <Text style={s.modalCounter}>{renameValue.trim().length}/64</Text>
+            {renameError && <Text style={s.modalError}>{renameError}</Text>}
+            <View style={s.modalActions}>
+              <TouchableOpacity
+                style={[s.modalBtn, s.modalCancelBtn, renameSubmitting && s.modalBtnDisabled]}
+                onPress={closeRename}
+                disabled={renameSubmitting}
+                activeOpacity={0.8}
+              >
+                <Text style={[s.modalBtnText, { color: colors.textMuted }]}>CANCEL</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.modalBtn, s.modalSaveBtn, renameSubmitting && s.modalBtnDisabled]}
+                onPress={submitRename}
+                disabled={renameSubmitting}
+                activeOpacity={0.8}
+              >
+                {renameSubmitting
+                  ? <ActivityIndicator color={colors.cyan} />
+                  : <Text style={[s.modalBtnText, { color: colors.cyan }]}>SAVE</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </ScrollView>
   );
 }
@@ -358,6 +465,54 @@ const styles = (c: ReturnType<typeof useTheme>) => StyleSheet.create({
   },
   registerBtnText: {
     color: c.cyan, fontSize: 11, fontWeight: '700', letterSpacing: 2,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+  },
+  renameBtn: { marginLeft: 6, paddingHorizontal: 4, paddingVertical: 2 },
+  renameIcon: {
+    color: c.cyan, fontSize: 14,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+  },
+  modalBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center', padding: 24,
+  },
+  modalCard: {
+    backgroundColor: c.surface, borderRadius: 12,
+    borderWidth: 1, borderColor: 'rgba(0,212,255,0.3)',
+    padding: 20,
+  },
+  modalTitle: {
+    color: c.text, fontSize: 12, fontWeight: '700', letterSpacing: 3,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+    marginBottom: 14,
+  },
+  modalInput: {
+    backgroundColor: c.bg, borderWidth: 1, borderColor: c.border,
+    borderRadius: 6, paddingHorizontal: 12, paddingVertical: 10,
+    color: c.text, fontSize: 14,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+  },
+  modalCounter: {
+    color: c.textMuted, fontSize: 10, marginTop: 6, textAlign: 'right',
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+  },
+  modalError: {
+    color: c.red, fontSize: 11, marginTop: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+  },
+  modalActions: {
+    flexDirection: 'row', justifyContent: 'flex-end',
+    gap: 8, marginTop: 16,
+  },
+  modalBtn: {
+    borderRadius: 6, paddingHorizontal: 14, paddingVertical: 9,
+    borderWidth: 1, minWidth: 90, alignItems: 'center',
+  },
+  modalCancelBtn: { borderColor: c.border, backgroundColor: 'transparent' },
+  modalSaveBtn: { borderColor: c.cyan, backgroundColor: 'rgba(0,212,255,0.08)' },
+  modalBtnDisabled: { opacity: 0.5 },
+  modalBtnText: {
+    fontSize: 10, fontWeight: '700', letterSpacing: 2,
     fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
   },
 });
