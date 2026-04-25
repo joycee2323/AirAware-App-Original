@@ -12,24 +12,12 @@ import { createWebSocket, api, ReconnectingWebSocket } from '../services/api';
 import { useTheme, getDroneColor } from '../theme';
 import { OP_STATUS_AIRBORNE } from '../services/odidParser';
 import { startBleScanning, stopBleScanning } from '../services/bleScanner';
-import { fetchNodes as fetchNodeRegistry, getNodeByMac, getDeviceIdFromMac } from '../services/nodeRegistry';
+import { fetchNodes as fetchNodeRegistry, getNodeByMac } from '../services/nodeRegistry';
 import * as Location from 'expo-location';
 
-const HEARTBEAT_INTERVAL_MS = 30_000;
-const HEARTBEAT_STALE_MS = 60_000;
-const HEARTBEAT_FORGET_MS = 300_000;
 const NICKNAMES_STORAGE_KEY = 'drone_nicknames';
 const NODE_REGISTRATION_URL = 'https://watch.westshoredrone.com/nodes';
 
-const loggedMissingHeartbeatNodes = new Set<string>();
-// Last time we saw a BLE advertisement from each node (keyed by raw uppercased
-// MAC, same key as heartbeatTimers). Used to stop sending heartbeats once a
-// node goes out of range, since the BLE foreground service keeps this JS
-// process alive indefinitely.
-const lastBleSeenAt = new Map<string, number>();
-// MACs whose heartbeat is currently in the "skipping (stale)" state, so the
-// skip log fires once on the fresh→stale transition rather than every tick.
-const currentlySkippingHeartbeats = new Set<string>();
 // uasIds we've already logged a BLE-skip message for — keeps logcat readable
 // when the same drone is seen thousands of times. Bounded by distinct drones
 // the app sees per session, which is small in practice.
@@ -95,63 +83,13 @@ export default function LiveMapScreen() {
   const cameraRef = useRef<MapboxGL.Camera>(null);
   const timeouts = useRef<Record<string, any>>({});
 
-  const heartbeatTimers = useRef<Map<string, any>>(new Map());
-
   const droneList = Object.values(backendDrones);
 
-  const sendHeartbeat = useCallback(async (mac: string) => {
-    const deviceId = getDeviceIdFromMac(mac);
-    try {
-      const pos = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
-      await api.nodeHeartbeat(deviceId, {
-        last_lat: pos.coords.latitude,
-        last_lon: pos.coords.longitude,
-      });
-    } catch (err: any) {
-      if (err?.status === 404) {
-        if (!loggedMissingHeartbeatNodes.has(deviceId)) {
-          loggedMissingHeartbeatNodes.add(deviceId);
-          console.warn(`nodeHeartbeat: node ${deviceId} not found, dropping heartbeats (logged once per session)`);
-        }
-        return;
-      }
-      console.warn('nodeHeartbeat failed:', err);
-    }
-  }, []);
-
-  const ensureHeartbeat = useCallback((mac: string) => {
-    if (heartbeatTimers.current.has(mac)) return;
-    sendHeartbeat(mac);
-    const timer = setInterval(() => {
-      const last = lastBleSeenAt.get(mac);
-      const now = Date.now();
-      const idleMs = last == null ? Infinity : now - last;
-      const wasSkipping = currentlySkippingHeartbeats.has(mac);
-
-      if (idleMs > HEARTBEAT_FORGET_MS) {
-        clearInterval(timer);
-        heartbeatTimers.current.delete(mac);
-        lastBleSeenAt.delete(mac);
-        currentlySkippingHeartbeats.delete(mac);
-        console.log(`[heartbeat] forget ${getDeviceIdFromMac(mac)}: no BLE for 5+ min`);
-        return;
-      }
-
-      if (idleMs > HEARTBEAT_STALE_MS) {
-        if (!wasSkipping) {
-          currentlySkippingHeartbeats.add(mac);
-          console.log(`[heartbeat] skip ${getDeviceIdFromMac(mac)}: stale ${Math.round(idleMs / 1000)}s`);
-        }
-        return;
-      }
-
-      if (wasSkipping) currentlySkippingHeartbeats.delete(mac);
-      sendHeartbeat(mac);
-    }, HEARTBEAT_INTERVAL_MS);
-    heartbeatTimers.current.set(mac, timer);
-  }, [sendHeartbeat]);
+  // Heartbeat is now driven by the native FG service (NodeHeartbeatUploader).
+  // Living in Kotlin lets it survive Android Doze, so nodes stay "online" on
+  // the dashboard while the phone screen is off. JS no longer maintains
+  // per-node timers, last-seen state, or 404/skip tracking — see
+  // android/app/src/main/java/com/westshoredrone/watch/NodeHeartbeatUploader.kt.
 
   // Refetch the node list for the active deployment. Used by the initial load,
   // focus/foreground resume, and unknown-node WS messages. Accepts an optional
@@ -200,16 +138,12 @@ export default function LiveMapScreen() {
         },
         (mac, rssi) => {
           updateNearbyNode(mac, rssi);
-          lastBleSeenAt.set(mac, Date.now());
-          ensureHeartbeat(mac);
         }
       );
     });
     return () => {
       wsRef.current?.close();
       stopBleScanning();
-      heartbeatTimers.current.forEach(t => clearInterval(t));
-      heartbeatTimers.current.clear();
       if (refetchDebounceTimer.current) clearTimeout(refetchDebounceTimer.current);
     };
   }, []);

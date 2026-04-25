@@ -76,16 +76,9 @@ export const api = {
     request('PATCH', `/deployments/nodes/${nodeId}/assign`, { deployment_id: null }),
   setNodeDisplayOrder: (nodeId: string, displayOrder: number | null) =>
     request('PATCH', `/nodes/${nodeId}/display-order`, { display_order: displayOrder }),
-  nodeHeartbeat: (
-    deviceId: string,
-    payload: { last_lat?: number; last_lon?: number; firmware_version?: string; connection_type?: string },
-  ) =>
-    request('POST', `/nodes/${encodeURIComponent(deviceId)}/heartbeat`, {
-      connection_type: payload.connection_type ?? 'ble_relay',
-      ...(payload.last_lat != null ? { last_lat: payload.last_lat } : {}),
-      ...(payload.last_lon != null ? { last_lon: payload.last_lon } : {}),
-      ...(payload.firmware_version != null ? { firmware_version: payload.firmware_version } : {}),
-    }),
+  // Note: heartbeat POSTs to /nodes/:device_id/heartbeat are now sent from
+  // the native FG service (NodeHeartbeatUploader.kt) so they survive Doze.
+  // No JS wrapper here — the native side talks to the backend directly.
   nodeDetections: (deviceId: string, drones: any[]) =>
     request('POST', `/nodes/${encodeURIComponent(deviceId)}/detections`, { drones }),
   getNodeLimit: () => request('GET', '/nodes/limit'),
