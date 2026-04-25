@@ -384,20 +384,17 @@ class BLEScannerService : Service() {
             // notification for new uasIds.
             parsed.uasId
         } else {
-            val prev = attributionBySource[sourceMacUpper]
-            if (prev != null && (now - prev.lastBasicIdAtMs) <= ATTRIBUTION_TTL_MS) {
-                // [diag] TEMPORARY — revert after triage.
-                Log.i(TAG,
-                    "[diag] attrib inherit sourceMac=$sourceMacUpper -> uasId=${prev.uasId} " +
-                    "lat=${parsed.lat} lon=${parsed.lon}")
-                prev.uasId
-            } else {
-                // [diag] TEMPORARY — revert after triage.
-                Log.i(TAG,
-                    "[diag] attrib miss sourceMac=$sourceMacUpper " +
-                    "lat=${parsed.lat} lon=${parsed.lon} — dropped")
-                null
-            }
+            // Pack-only mode: with self-identifying Pack frames (msgType 0xF) carrying
+            // every drone's uasId in-band, the legacy source-MAC-based inheritance
+            // fallback is no longer needed and was a known cause of two-drone position
+            // swaps when BasicId arrival timing crossed between drones. If Pack
+            // emission breaks at the firmware level (watch for ESP_LOGE lines from
+            // ble_relay.c:286 and :292), drones will silently stop reporting until
+            // Packs are restored.
+            Log.i(TAG,
+                "[diag] legacy frame dropped (Pack-only mode) sourceMac=$sourceMacUpper " +
+                "lat=${parsed.lat} lon=${parsed.lon}")
+            null
         }
 
         if (effectiveUasId == null) return

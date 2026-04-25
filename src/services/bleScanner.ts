@@ -157,10 +157,14 @@ export async function startBleScanning(
         void notifyNewDrone(parsed.uasId);
       }
     } else {
-      const prev = mergeBySource.get(sourceMacUpper);
-      if (prev && (now - prev.lastBasicIdAt) <= ATTRIBUTION_TTL_MS) {
-        effectiveUasId = prev.uasId;
-      }
+      // Pack-only mode: with self-identifying Pack frames (msgType 0xF) carrying
+      // every drone's uasId in-band, the legacy source-MAC-based inheritance
+      // fallback is no longer needed and was a known cause of two-drone position
+      // swaps when BasicId arrival timing crossed between drones. If Pack
+      // emission breaks at the firmware level (watch for ESP_LOGE lines from
+      // ble_relay.c:286 and :292), drones will silently stop reporting until
+      // Packs are restored.
+      console.log(`[livemap] legacy frame dropped (Pack-only mode) sourceMac=${sourceMacUpper} lat=${parsed.lat} lon=${parsed.lon}`);
     }
 
     if (!effectiveUasId) return;
