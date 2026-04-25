@@ -45,6 +45,7 @@ class BLEScannerService : Service() {
     private var scanning = false
 
     @Volatile private var uploader: DetectionUploader? = null
+    @Volatile private var heartbeat: NodeHeartbeatUploader? = null
 
     // sourceMac (uppercased) -> most recent uasId + when BasicId last arrived.
     // Mirrors the mergeBySource TTL logic from src/services/bleScanner.ts so we
@@ -83,6 +84,10 @@ class BLEScannerService : Service() {
                     it.configure(UploadConfig.baseUrl, UploadConfig.authToken)
                     it.start()
                 }
+                heartbeat = NodeHeartbeatUploader(h, applicationContext).also {
+                    it.configure(UploadConfig.baseUrl, UploadConfig.authToken)
+                    it.start()
+                }
                 activeInstance = this
             }
         }
@@ -99,6 +104,8 @@ class BLEScannerService : Service() {
                 uploader?.flushBlocking(3_000L)
                 uploader?.stop()
                 uploader = null
+                heartbeat?.stop()
+                heartbeat = null
                 stopForegroundCompat()
                 stopSelf()
                 return START_NOT_STICKY
@@ -116,6 +123,8 @@ class BLEScannerService : Service() {
         stopScan()
         uploader?.stop()
         uploader = null
+        heartbeat?.stop()
+        heartbeat = null
         if (activeInstance === this) activeInstance = null
         stopForegroundCompat()
         releaseWakeLock()
@@ -320,10 +329,21 @@ class BLEScannerService : Service() {
 
         emitEvent(EVENT_SCAN_RESULT, map)
 
+        // Mark this node as recently-seen for the native heartbeat uploader.
+        // Westshore-OUI MACs identify our own nodes; the heartbeat path is what
+        // keeps nodes.last_seen current on the backend. Pre-port this lived in
+        // JS (LiveMapScreen.tsx) and froze under Doze; running it here lets
+        // heartbeats survive screen-off.
+        val macUpper = mac.uppercase()
+        if (isWestshoreWatchNode(macUpper)) {
+            val deviceId = macUpper.replace(":", "").replace("-", "")
+            heartbeat?.markNodeSeen(deviceId)
+        }
+
         // Now do the Kotlin-side upload path. Screen-off Doze suspends the JS
         // runtime, so parsing + POSTing here keeps detections flowing even
         // when the JS listener is dormant.
-        maybeEnqueueForUpload(mac.uppercase(), record?.serviceData)
+        maybeEnqueueForUpload(macUpper, record?.serviceData)
     }
 
     private fun maybeEnqueueForUpload(sourceMacUpper: String, serviceData: Map<android.os.ParcelUuid, ByteArray>?) {
@@ -528,6 +548,7 @@ class BLEScannerService : Service() {
             UploadConfig.baseUrl = baseUrl ?: UploadConfig.baseUrl
             UploadConfig.authToken = authToken
             activeInstance?.uploader?.configure(UploadConfig.baseUrl, UploadConfig.authToken)
+            activeInstance?.heartbeat?.configure(UploadConfig.baseUrl, UploadConfig.authToken)
         }
     }
 }
