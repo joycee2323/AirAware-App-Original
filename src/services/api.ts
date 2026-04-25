@@ -76,6 +76,8 @@ export const api = {
     request('PATCH', `/deployments/nodes/${nodeId}/assign`, { deployment_id: null }),
   setNodeDisplayOrder: (nodeId: string, displayOrder: number | null) =>
     request('PATCH', `/nodes/${nodeId}/display-order`, { display_order: displayOrder }),
+  renameNode: (nodeId: string, name: string) =>
+    request('PATCH', `/deployments/nodes/${nodeId}/rename`, { name }),
   // Note: heartbeat POSTs to /nodes/:device_id/heartbeat are now sent from
   // the native FG service (NodeHeartbeatUploader.kt) so they survive Doze.
   // No JS wrapper here — the native side talks to the backend directly.
