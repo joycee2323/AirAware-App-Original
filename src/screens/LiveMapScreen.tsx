@@ -688,6 +688,10 @@ const styles = (c: ReturnType<typeof useTheme>) => StyleSheet.create({
     color: c.cyan, fontSize: 11, fontWeight: '700', letterSpacing: 2,
     fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
   },
+  depName: {
+    color: c.text, fontSize: 12, fontWeight: '600', letterSpacing: 1, marginTop: 2,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+  },
   nodeNearby: {
     color: '#00ff88', fontSize: 9, marginTop: 2, letterSpacing: 1,
     fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',

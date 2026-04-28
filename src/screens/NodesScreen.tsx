@@ -78,7 +78,7 @@ export default function NodesScreen() {
         }
       },
     }));
-    options.push({ text: 'Cancel', onPress: () => {} });
+    options.push({ text: 'Cancel', onPress: async () => {} });
     Alert.alert('Assign to Deployment', `Select a deployment for "${node.name || 'this node'}"`, options);
   };
 
