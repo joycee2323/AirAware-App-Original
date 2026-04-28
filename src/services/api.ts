@@ -130,6 +130,9 @@ export const api = {
     const token = await getToken();
     return `${BASE}/export/${deploymentId}/csv?token=${token}`;
   },
+
+  // Docs (public — no auth required)
+  getManualUrl: () => request('GET', '/docs/manual-url'),
 };
 
 // WebSocket connection — auto-reconnecting with exponential backoff + keepalive.
