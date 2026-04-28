@@ -187,14 +187,24 @@ export function createWebSocket(
     if (keepaliveTimer !== null) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
   };
 
-  const connect = () => {
+  const connect = async () => {
     if (disposed) return;
     statusVal = hasEverConnected ? 'reconnecting' : 'connecting';
 
-    const socket = new WebSocket(WS_URL);
+    // Phase A: pass JWT in the handshake URL so the backend can attach
+    // ws.orgId on connect. Re-read on every attempt so a token refresh
+    // between drops doesn't leave a stale token in the URL.
+    let token: string | null = null;
+    try { token = await getToken(); } catch { token = null; }
+    if (disposed) return;
+
+    const url = token
+      ? `${WS_URL}?token=${encodeURIComponent(token)}`
+      : WS_URL;
+    const socket = new WebSocket(url);
     ws = socket;
 
-    socket.onopen = async () => {
+    socket.onopen = () => {
       console.info('[ws] connected to', WS_URL);
       statusVal = 'connected';
       attempt = 0;
@@ -202,10 +212,6 @@ export function createWebSocket(
       hasEverConnected = true;
       hadUnexpectedClose = false;
 
-      const token = await getToken();
-      // Guard: another close/reconnect could have fired while awaiting token.
-      if (socket.readyState !== WebSocket.OPEN) return;
-      socket.send(JSON.stringify({ type: 'AUTH', token }));
       socket.send(JSON.stringify({ type: 'SUBSCRIBE', deployment_id: deploymentId }));
 
       clearKeepalive();
