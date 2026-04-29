@@ -28,6 +28,7 @@ module.exports = ({ config }) => ({
         backgroundColor: '#0a0e1a',
       },
       package: 'com.westshoredrone.watch',
+      versionCode: 1,
       permissions: [
         'BLUETOOTH',
         'BLUETOOTH_ADMIN',
