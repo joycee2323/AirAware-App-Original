@@ -19,5 +19,9 @@ app-log.txt
 *.pem
 *.keystore
 
-# Build artifacts
-android/app/src/main/assets/
+# Build artifacts. Use a contents glob (not bare directory) so the
+# Play-verification file below can override via negation; bare
+# `dir/` excludes the directory itself and prevents re-inclusion of
+# anything inside it.
+android/app/src/main/assets/*
+!android/app/src/main/assets/adi-registration.properties
