@@ -56,7 +56,13 @@ export const api = {
       ...(timezone ? { timezone } : {}),
     });
   },
-  register: (data: { name: string; email: string; org_name: string; password: string }) =>
+  register: (data: {
+    name: string;
+    email: string;
+    org_name: string;
+    password: string;
+    accepted_terms: boolean;
+  }) =>
     request('POST', '/auth/register', data),
   forgotPassword: (email: string) =>
     request('POST', '/auth/forgot-password', { email }),

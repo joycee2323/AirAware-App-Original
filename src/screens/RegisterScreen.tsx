@@ -9,6 +9,7 @@ import { api } from '../services/api';
 import { useTheme } from '../theme';
 
 const TERMS_URL = 'https://watch.westshoredrone.com/terms';
+const PRIVACY_URL = 'https://watch.westshoredrone.com/privacy';
 
 export default function RegisterScreen({ navigation }: any) {
   const colors = useTheme();
@@ -18,6 +19,7 @@ export default function RegisterScreen({ navigation }: any) {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [acceptedPrivacy, setAcceptedPrivacy] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const handleRegister = async () => {
@@ -33,8 +35,11 @@ export default function RegisterScreen({ navigation }: any) {
       Alert.alert('Weak Password', 'Password must be at least 8 characters.');
       return;
     }
-    if (!acceptedTerms) {
-      Alert.alert('Terms Required', 'You must accept the Terms of Service to continue.');
+    if (!acceptedTerms || !acceptedPrivacy) {
+      Alert.alert(
+        'Agreement Required',
+        'You must accept the Terms of Service and Privacy Policy to continue.',
+      );
       return;
     }
     setLoading(true);
@@ -44,6 +49,7 @@ export default function RegisterScreen({ navigation }: any) {
         email: email.trim(),
         org_name: organization.trim(),
         password,
+        accepted_terms: true,
       });
       Alert.alert(
         'Check Your Email',
@@ -142,6 +148,27 @@ export default function RegisterScreen({ navigation }: any) {
                 onPress={() => Linking.openURL(TERMS_URL)}
               >
                 Terms of Service
+              </Text>
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={s.termsRow}
+            onPress={() => setAcceptedPrivacy(v => !v)}
+            activeOpacity={0.7}
+          >
+            <View style={[s.checkbox, acceptedPrivacy && s.checkboxChecked]}>
+              {acceptedPrivacy && (
+                <Ionicons name="checkmark" size={16} color="#000" />
+              )}
+            </View>
+            <Text style={s.termsText}>
+              I agree to the{' '}
+              <Text
+                style={s.termsLink}
+                onPress={() => Linking.openURL(PRIVACY_URL)}
+              >
+                Privacy Policy
               </Text>
             </Text>
           </TouchableOpacity>

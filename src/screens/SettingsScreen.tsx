@@ -20,6 +20,8 @@ import { getLastRegistrationStatus, registerForPushNotifications } from '../serv
 // with the backend route (src/routes/docs.js) — both must point at the
 // same canonical URL.
 const MANUAL_URL_FALLBACK = 'https://api.westshoredrone.com/docs/westshore-watch-instruction-manual.pdf';
+const PRIVACY_URL = 'https://watch.westshoredrone.com/privacy';
+const TERMS_URL = 'https://watch.westshoredrone.com/terms';
 
 export default function SettingsScreen() {
   const colors = useTheme();
@@ -284,6 +286,42 @@ export default function SettingsScreen() {
           subtitle="View the full instruction manual"
           right={<Text style={s.chevron}>›</Text>}
           onPress={handleOpenManual}
+          isLast={true}
+        />
+      </View>
+
+      {/* Legal */}
+      <View style={s.rowCard}>
+        <SettingRow
+          colors={colors}
+          label="Privacy Policy"
+          subtitle="How we collect and use your data"
+          right={<Text style={s.chevron}>›</Text>}
+          onPress={() => {
+            Linking.openURL(PRIVACY_URL).catch(err => {
+              console.warn('[settings] failed to open privacy:', err);
+              Alert.alert(
+                'Could not open Privacy Policy',
+                'Please try again or visit watch.westshoredrone.com/privacy.',
+              );
+            });
+          }}
+          isLast={false}
+        />
+        <SettingRow
+          colors={colors}
+          label="Terms of Service"
+          subtitle="Terms governing your use of Westshore Watch"
+          right={<Text style={s.chevron}>›</Text>}
+          onPress={() => {
+            Linking.openURL(TERMS_URL).catch(err => {
+              console.warn('[settings] failed to open terms:', err);
+              Alert.alert(
+                'Could not open Terms of Service',
+                'Please try again or visit watch.westshoredrone.com/terms.',
+              );
+            });
+          }}
           isLast={true}
         />
       </View>
