@@ -80,7 +80,17 @@ export const api = {
   cancelDeployment: (id: string) => request('POST', `/deployments/${id}/cancel`),
   pauseDeployment: (id: string) => request('POST', `/deployments/${id}/pause`),
   resumeDeployment: (id: string) => request('POST', `/deployments/${id}/resume`),
+  startDeployment: (id: string) => request('POST', `/deployments/${id}/start`),
   deleteDeployment: (id: string) => request('DELETE', `/deployments/${id}`),
+
+  // Pre-assigned nodes (join-table resource on the deployment). add returns
+  // { deployment_id, node_id, node_name, warnings? } — warnings is a non-
+  // blocking string[] of overlapping-window notices the UI surfaces via
+  // Alert. remove returns { ok: true } or 404 if the join row was missing.
+  addPreassignedNode: (deploymentId: string, nodeId: string) =>
+    request('POST', `/deployments/${deploymentId}/preassigned-nodes`, { node_id: nodeId }),
+  removePreassignedNode: (deploymentId: string, nodeId: string) =>
+    request('DELETE', `/deployments/${deploymentId}/preassigned-nodes/${nodeId}`),
 
   // Nodes
   getNodes: (deploymentId?: string) =>

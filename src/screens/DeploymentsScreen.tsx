@@ -20,6 +20,7 @@ export default function DeploymentsScreen() {
   const user = useAuthStore(s => s.user);
   const c = caps(user);
   const [deployments, setDeployments] = useState<any[]>([]);
+  const [orgNodes, setOrgNodes] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [newName, setNewName] = useState('');
@@ -32,6 +33,13 @@ export default function DeploymentsScreen() {
   const [mode, setMode] = useState<'event' | 'continuous'>('event');
   const [iosPickerOpen, setIosPickerOpen] = useState(false);
   const [iosPickerDraft, setIosPickerDraft] = useState<Date>(() => new Date(Date.now() + 15 * 60_000));
+  // Pre-assignment chip selection in the create form. Cleared whenever
+  // scheduleLater toggles off so a stale set can't sneak through if the
+  // operator changes their mind.
+  const [createPreassignNodeIds, setCreatePreassignNodeIds] = useState<string[]>([]);
+  // Inline add-pre-assigned-node picker target on scheduled cards. Null
+  // when closed; the deployment id when open. Only one open at a time.
+  const [addPickerFor, setAddPickerFor] = useState<string | null>(null);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 60_000);
@@ -40,9 +48,14 @@ export default function DeploymentsScreen() {
 
   const load = useCallback(async () => {
     try {
-      const [deps, bill] = await Promise.all([api.getDeployments(), api.getBillingStatus()]);
+      const [deps, bill, nodes] = await Promise.all([
+        api.getDeployments(),
+        api.getBillingStatus(),
+        api.getNodes(),
+      ]);
       setDeployments(deps);
       setBilling(bill);
+      setOrgNodes(Array.isArray(nodes) ? nodes : []);
     } catch (err: any) {
       Alert.alert('Error', err.message);
     } finally {
@@ -110,17 +123,99 @@ export default function DeploymentsScreen() {
     setCreating(true);
     try {
       const res = await api.createDeployment(newName.trim(), scheduledFor, mode);
+
+      // Pre-assignment only applies to scheduled deployments. Fire in
+      // parallel; collect per-call warnings and failures. Joined into a
+      // single Alert at the end so the operator doesn't get spammed with
+      // modal dialogs on a multi-node selection.
+      const messages: string[] = [];
+      if (res?.warning) messages.push(res.warning);
+      if (scheduledFor && res?.id && createPreassignNodeIds.length > 0) {
+        const settled = await Promise.all(
+          createPreassignNodeIds.map(nodeId =>
+            api.addPreassignedNode(res.id, nodeId)
+              .then((r: any) => ({ ok: true, r, nodeId }))
+              .catch((e: any) => ({ ok: false, err: e, nodeId }))
+          )
+        );
+        for (const s of settled) {
+          if (!s.ok) {
+            const node = orgNodes.find(n => n.id === s.nodeId);
+            messages.push(`Pre-assign failed for ${node?.name || 'node'}: ${(s as any).err?.message || 'request failed'}`);
+          } else if ((s as any).r?.warnings?.length) {
+            for (const w of (s as any).r.warnings) messages.push(w);
+          }
+        }
+      }
+
       setNewName('');
       setMode('event');
       setScheduleLater(false);
       setScheduledDate(null);
-      if (res?.warning) Alert.alert('Heads up', res.warning);
+      setCreatePreassignNodeIds([]);
+      if (messages.length > 0) Alert.alert('Heads up', messages.join('\n\n'));
       await load();
     } catch (err: any) {
       Alert.alert('Error', err.message);
     } finally {
       setCreating(false);
     }
+  };
+
+  const handleStart = (dep: any) => {
+    const when = dep.scheduled_for ? new Date(dep.scheduled_for).toLocaleString() : 'later';
+    Alert.alert(
+      'Start Now',
+      `Start "${dep.name}" now?\n\nIt was scheduled for ${when}.\nAny pre-assigned node will be reassigned from its current state.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Start Now', onPress: async () => {
+          try {
+            const res = await api.startDeployment(dep.id);
+            const msgs: string[] = [];
+            if (res?.warning) msgs.push(res.warning);
+            if (res?.reassignments?.length) {
+              msgs.push(`Reassigned ${res.reassignments.length} node${res.reassignments.length === 1 ? '' : 's'}.`);
+            }
+            if (msgs.length > 0) Alert.alert('Started', msgs.join('\n\n'));
+            await load();
+          } catch (err: any) {
+            Alert.alert('Error', err.message);
+          }
+        }},
+      ]
+    );
+  };
+
+  const handleAddPreassigned = async (dep: any, nodeId: string) => {
+    try {
+      const res = await api.addPreassignedNode(dep.id, nodeId);
+      setAddPickerFor(null);
+      if (res?.warnings?.length) {
+        Alert.alert('Heads up', res.warnings.join('\n\n'));
+      }
+      await load();
+    } catch (err: any) {
+      Alert.alert('Error', err.message);
+    }
+  };
+
+  const handleRemovePreassigned = (dep: any, node: any) => {
+    Alert.alert(
+      'Remove Pre-assigned Node',
+      `Remove ${node.name} from pre-assigned nodes?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Remove', style: 'destructive', onPress: async () => {
+          try {
+            await api.removePreassignedNode(dep.id, node.id);
+            await load();
+          } catch (err: any) {
+            Alert.alert('Error', err.message);
+          }
+        }},
+      ]
+    );
   };
 
   const handleCancel = (dep: any) => {
@@ -250,6 +345,7 @@ export default function DeploymentsScreen() {
               setMode('continuous');
               setScheduleLater(false);
               setScheduledDate(null);
+              setCreatePreassignNodeIds([]);
             }}
             activeOpacity={0.6}
           >
@@ -264,7 +360,10 @@ export default function DeploymentsScreen() {
           style={s.scheduleRow}
           onPress={() => {
             setScheduleLater(v => {
-              if (v) setScheduledDate(null);
+              if (v) {
+                setScheduledDate(null);
+                setCreatePreassignNodeIds([]);
+              }
               return !v;
             });
           }}
@@ -282,6 +381,34 @@ export default function DeploymentsScreen() {
               {scheduledDate ? scheduledDate.toLocaleString() : 'Choose date & time'}
             </Text>
           </TouchableOpacity>
+        )}
+
+        {mode === 'event' && scheduleLater && orgNodes.length > 0 && (
+          <View style={s.createPreassignSection}>
+            <Text style={s.preassignLabel}>PRE-ASSIGN NODES (OPTIONAL)</Text>
+            <View style={s.chipRow}>
+              {orgNodes.map(n => {
+                const selected = createPreassignNodeIds.includes(n.id);
+                return (
+                  <TouchableOpacity
+                    key={n.id}
+                    onPress={() => setCreatePreassignNodeIds(prev =>
+                      prev.includes(n.id) ? prev.filter(x => x !== n.id) : [...prev, n.id]
+                    )}
+                    style={[s.chipPickerItem, selected && s.chipPickerItemSelected]}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[s.chipPickerItemText, selected && s.chipPickerItemTextSelected]}>
+                      {n.name || n.device_id}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <Text style={s.preassignHint}>
+              Pre-assigned nodes are force-reassigned to this deployment at activation, regardless of their current state.
+            </Text>
+          </View>
         )}
 
         <TouchableOpacity
@@ -309,6 +436,11 @@ export default function DeploymentsScreen() {
               const scheduledMs = new Date(dep.scheduled_for).getTime();
               const startsIn = Number.isFinite(scheduledMs) ? scheduledMs - now : null;
               const overdue = startsIn !== null && startsIn <= 0;
+              const preassigned: any[] = Array.isArray(dep.pre_assigned_nodes) ? dep.pre_assigned_nodes : [];
+              const preassignedIds = new Set(preassigned.map((n: any) => n.id));
+              const available = orgNodes.filter((n: any) => !preassignedIds.has(n.id));
+              const pickerOpen = addPickerFor === dep.id;
+              const showPreassignRow = preassigned.length > 0 || c.canCreateDeployment;
               return (
                 <View key={dep.id} style={[s.card, s.scheduledCard]}>
                   <View style={s.depHeader}>
@@ -323,7 +455,72 @@ export default function DeploymentsScreen() {
                       {overdue ? 'Starting momentarily…' : `Starts in ${formatLeadTime(startsIn)}`}
                     </Text>
                   )}
+                  {showPreassignRow && (
+                    <View style={s.preassignBlock}>
+                      <Text style={s.preassignLabel}>PRE-ASSIGNED</Text>
+                      <View style={s.chipRow}>
+                        {preassigned.length === 0 && !c.canCreateDeployment && (
+                          <Text style={s.preassignEmpty}>none</Text>
+                        )}
+                        {preassigned.map((n: any) => (
+                          <View key={n.id} style={s.preassignChip}>
+                            <Text style={s.preassignChipText}>{n.name}</Text>
+                            {c.canCreateDeployment && (
+                              <TouchableOpacity
+                                onPress={() => handleRemovePreassigned(dep, n)}
+                                style={s.preassignChipRemove}
+                                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                              >
+                                <Text style={s.preassignChipRemoveText}>×</Text>
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        ))}
+                        {c.canCreateDeployment && available.length > 0 && !pickerOpen && (
+                          <TouchableOpacity
+                            onPress={() => setAddPickerFor(dep.id)}
+                            style={s.addNodeBtn}
+                            activeOpacity={0.7}
+                          >
+                            <Text style={s.addNodeBtnText}>+ ADD NODE</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                      {pickerOpen && (
+                        <View style={s.pickerBlock}>
+                          {available.length === 0 ? (
+                            <Text style={s.preassignEmpty}>No other nodes available.</Text>
+                          ) : (
+                            <View style={s.chipRow}>
+                              {available.map((n: any) => (
+                                <TouchableOpacity
+                                  key={n.id}
+                                  onPress={() => handleAddPreassigned(dep, n.id)}
+                                  style={s.chipPickerItem}
+                                  activeOpacity={0.7}
+                                >
+                                  <Text style={s.chipPickerItemText}>{n.name || n.device_id}</Text>
+                                </TouchableOpacity>
+                              ))}
+                              <TouchableOpacity
+                                onPress={() => setAddPickerFor(null)}
+                                style={s.pickerCancelBtn}
+                                activeOpacity={0.7}
+                              >
+                                <Text style={s.pickerCancelBtnText}>CANCEL</Text>
+                              </TouchableOpacity>
+                            </View>
+                          )}
+                        </View>
+                      )}
+                    </View>
+                  )}
                   <View style={s.depActions}>
+                    {c.canCreateDeployment && (
+                      <TouchableOpacity style={[s.actionBtn, s.cyanBtn]} onPress={() => handleStart(dep)}>
+                        <Text style={[s.actionBtnText, { color: colors.cyan }]}>START NOW</Text>
+                      </TouchableOpacity>
+                    )}
                     {c.canCreateDeployment && (
                       <TouchableOpacity style={[s.actionBtn, s.amberOutlineBtn]} onPress={() => handleCancel(dep)}>
                         <Text style={[s.actionBtnText, { color: colors.amber }]}>CANCEL</Text>
@@ -640,6 +837,55 @@ const styles = (c: ReturnType<typeof useTheme>) => StyleSheet.create({
     color: c.text, fontSize: 10, fontWeight: '600', letterSpacing: 1,
     fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
   },
+  // Pre-assignment chips, picker, and START NOW button. cyanBtn mirrors
+  // amberOutlineBtn but in the primary accent — visually distinct from
+  // the existing amber CANCEL on the same scheduled card.
+  cyanBtn: { borderColor: c.cyan, backgroundColor: 'rgba(0,212,255,0.10)' },
+  preassignBlock: { marginTop: 6, marginBottom: 12 },
+  preassignLabel: {
+    color: c.textMuted, fontSize: 9, letterSpacing: 2, marginBottom: 6,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+  },
+  preassignHint: { color: c.textMuted, fontSize: 10, marginTop: 8, lineHeight: 14 },
+  preassignEmpty: { color: c.textMuted, fontSize: 11 },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, alignItems: 'center' },
+  preassignChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(0,212,255,0.10)',
+    borderWidth: 1, borderColor: 'rgba(0,212,255,0.30)',
+    borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4,
+  },
+  preassignChipText: {
+    color: c.cyan, fontSize: 11, fontWeight: '600',
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+  },
+  preassignChipRemove: { paddingHorizontal: 2 },
+  preassignChipRemoveText: { color: c.amber, fontSize: 16, fontWeight: '700', lineHeight: 16 },
+  addNodeBtn: {
+    borderWidth: 1, borderColor: c.border2, borderStyle: 'dashed',
+    borderRadius: 6, paddingHorizontal: 10, paddingVertical: 4,
+  },
+  addNodeBtnText: {
+    color: c.textDim, fontSize: 10, letterSpacing: 1, fontWeight: '600',
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+  },
+  pickerBlock: { marginTop: 8 },
+  chipPickerItem: {
+    borderWidth: 1, borderColor: c.border2,
+    backgroundColor: c.surface2,
+    borderRadius: 6, paddingHorizontal: 10, paddingVertical: 5,
+  },
+  chipPickerItemSelected: {
+    borderColor: c.cyan, backgroundColor: 'rgba(0,212,255,0.12)',
+  },
+  chipPickerItemText: { color: c.textDim, fontSize: 11 },
+  chipPickerItemTextSelected: { color: c.cyan, fontWeight: '600' },
+  pickerCancelBtn: { paddingHorizontal: 10, paddingVertical: 5 },
+  pickerCancelBtnText: {
+    color: c.textMuted, fontSize: 10, letterSpacing: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+  },
+  createPreassignSection: { marginTop: 4, marginBottom: 10 },
   empty: { alignItems: 'center', paddingTop: 60 },
   emptyText: {
     color: c.textMuted, fontSize: 12, letterSpacing: 3,
