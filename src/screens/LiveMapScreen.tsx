@@ -4,7 +4,7 @@ import {
 } from 'react-native';
 import MapboxGL from '@rnmapbox/maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import KeepScreenOnToggle from '../components/KeepScreenOnToggle';
 import { useDroneStore } from '../store/droneStore';
 import { useAuthStore } from '../store/authStore';
@@ -16,7 +16,6 @@ import { fetchNodes as fetchNodeRegistry, getNodeByMac } from '../services/nodeR
 import * as Location from 'expo-location';
 import { caps } from '../lib/caps';
 
-const NODE_REGISTRATION_URL = 'https://watch.westshoredrone.com/nodes';
 // Debounce window for nickname edits — avoids hammering the backend on every
 // keystroke while the operator is typing. Saves on settle.
 const NICKNAME_SAVE_DEBOUNCE_MS = 500;
@@ -30,6 +29,7 @@ const loggedSkippedUasIds = new Set<string>();
 export default function LiveMapScreen() {
   const colors = useTheme();
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<any>();
 
   // Subscribe to render-relevant state with individual selectors so that
   // high-frequency BLE updates to nearbyNodes don't re-render the whole screen.
@@ -519,7 +519,7 @@ export default function LiveMapScreen() {
       {userHasAnyNode === false && (
         <TouchableOpacity
           style={s.noNodesBanner}
-          onPress={() => Linking.openURL(NODE_REGISTRATION_URL)}
+          onPress={() => navigation.navigate('AddNode')}
           activeOpacity={0.8}
         >
           <View style={{ flex: 1 }}>
