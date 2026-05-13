@@ -660,6 +660,23 @@ export default function LiveMapScreen() {
         const dOpLat = liveDrone.opLat ?? liveDrone.op_lat;
         const dOpLon = liveDrone.opLon ?? liveDrone.op_lon;
 
+        // CTA-2063-A model decode. Backend resolves manufacturer + model
+        // from the uas_id prefix at ingest and writes both onto the
+        // drone_detections row; the WS DRONE_UPDATE payload + the initial
+        // /api/detections hydrate both carry these fields. BLE-mode drones
+        // (guest flow without backend) won't have them — fall through to
+        // 'Unknown'. Display per spec:
+        //   manufacturer + model present → "DJI Air 3"
+        //   manufacturer only            → "DJI"
+        //   neither                      → "Unknown"
+        const manufacturer = liveDrone.manufacturer;
+        const model = liveDrone.model;
+        const modelDisplay = manufacturer && model
+          ? `${manufacturer} ${model}`
+          : manufacturer
+            ? manufacturer
+            : 'Unknown';
+
         // Resolve source node name from the registry by BLE MAC.
         const srcMac = liveDrone.sourceMac;
         const sourceNode = srcMac ? getNodeByMac(srcMac) : null;
@@ -713,6 +730,7 @@ export default function LiveMapScreen() {
                 />
                 <View style={s.detailGrid}>
                   {[
+                    ['MODEL', modelDisplay],
                     ['POSITION', dLat != null ? `${Number(dLat).toFixed(6)}, ${Number(dLon).toFixed(6)}` : '—'],
                     ['ALTITUDE', dAlt != null ? `${Math.round(dAlt * 3.28084)}ft MSL` : '—'],
                     ['SPEED', dSpeed != null ? `${(dSpeed * 2.237).toFixed(1)}mph` : '—'],

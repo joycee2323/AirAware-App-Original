@@ -18,6 +18,11 @@ export interface DroneEntry extends Partial<OdidDetection> {
   opLat?: number;
   opLon?: number;
   sourceMac?: string;
+  // CTA-2063-A model decode, resolved server-side at ingest. Present on
+  // backend drones, absent on BLE-mode guest detections. Both nullable
+  // because unknown serials resolve to null/null.
+  manufacturer?: string | null;
+  model?: string | null;
 }
 
 interface DroneStore {

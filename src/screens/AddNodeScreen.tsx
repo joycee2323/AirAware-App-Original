@@ -1,24 +1,65 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, RefreshControl,
   TouchableOpacity, Alert, Platform, ActivityIndicator,
+  PermissionsAndroid, Linking,
 } from 'react-native';
+import * as Location from 'expo-location';
 import { useNavigation } from '@react-navigation/native';
 import { api } from '../services/api';
 import { fetchNodes, getUnclaimedNearby } from '../services/nodeRegistry';
-import { DiscoveredNode } from '../services/bleScanner';
+import {
+  DiscoveredNode,
+  startBleScanning, stopBleScanning, isBleScanning,
+} from '../services/bleScanner';
 import { useTheme } from '../theme';
 import { useAuthStore } from '../store/authStore';
 import { caps } from '../lib/caps';
+
+// Mirrors the same permissions request LiveMapScreen issues right before
+// it starts BLE scanning. Inlined (not exported from a shared helper) for
+// the same reason LiveMap inlines it — two callers, both short, and the
+// API surface is the React Native + Expo grant flow rather than something
+// app-specific worth abstracting.
+async function requestScanPermissions(): Promise<void> {
+  await Location.requestForegroundPermissionsAsync();
+  if (Platform.OS === 'android' && Platform.Version >= 31) {
+    await PermissionsAndroid.requestMultiple([
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+    ]);
+  }
+  if (Platform.OS === 'android' && Platform.Version >= 33) {
+    await PermissionsAndroid.request('android.permission.POST_NOTIFICATIONS' as any);
+  }
+}
+
+// How long to show "Starting scanner…" before falling through to
+// "NO NODES IN RANGE" when this screen is the one that started the scan.
+// 3s covers BLE init + first scan callback on a typical device — long
+// enough to avoid a misleading "no nodes" flash, short enough that a
+// genuinely empty area transitions promptly.
+const SCANNER_WARMUP_MS = 3000;
 
 export default function AddNodeScreen() {
   const colors = useTheme();
   const navigation = useNavigation<any>();
   const user = useAuthStore(s => s.user);
   const c = caps(user);
+  const canPairNode = c.canPairNode;
   const [unclaimed, setUnclaimed] = useState<DiscoveredNode[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [claiming, setClaiming] = useState<string | null>(null);
+  // True for ~SCANNER_WARMUP_MS after we started the scanner ourselves;
+  // suppresses the "NO NODES IN RANGE" empty state during that window so
+  // onboarding users don't see a misleading flash. Stays false when LiveMap
+  // already had the scanner running (cache is hot — nodes appear instantly).
+  const [warmingUp, setWarmingUp] = useState(false);
+  // True iff this screen instance invoked startBleScanning AND it succeeded
+  // AND we weren't unmounted before the await resolved. Drives whether the
+  // unmount cleanup tears the scanner back down. If LiveMap (or any other
+  // owner) had the scanner running before we mounted, we leave it alone.
+  const startedByThisScreenRef = useRef(false);
 
   const refresh = useCallback(async () => {
     await fetchNodes();
@@ -27,9 +68,87 @@ export default function AddNodeScreen() {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(() => setUnclaimed(getUnclaimedNearby()), 2000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+    let cancelled = false;
+    let warmupTimer: any = null;
+    const pollTimer = setInterval(() => setUnclaimed(getUnclaimedNearby()), 2000);
+
+    // Viewers shouldn't trigger a scanner — they can't claim anyway, and
+    // the read-only branch below renders before any UI that depends on
+    // the cache. Skip permissions + start, keep the polling so the (empty)
+    // empty-state still renders consistently.
+    if (!canPairNode) {
+      return () => {
+        cancelled = true;
+        clearInterval(pollTimer);
+      };
+    }
+
+    (async () => {
+      // If something else is already scanning (typically LiveMap mounted
+      // first in the post-skip path), discoveredNodes is already populated
+      // and we just consume the cache. No warmup, no ownership transfer.
+      const wasAlreadyScanning = isBleScanning();
+      if (wasAlreadyScanning) return;
+
+      setWarmingUp(true);
+      try {
+        await requestScanPermissions();
+        if (cancelled) return;
+        // Pass no-op callbacks. discoveredNodes is populated inside
+        // bleScanner.ts unconditionally on every WW-node sighting (it
+        // doesn't gate on the optional onNodeNearby), so AddNodeScreen
+        // doesn't need to handle the firehose.
+        await startBleScanning(() => {}, () => {});
+        if (cancelled) {
+          // Race: user navigated away during the await. The scanner DID
+          // come up, so we own it and have to tear it down ourselves —
+          // otherwise the FG service leaks until logout. Cleanup ran
+          // before this branch with startedByThisScreenRef still false,
+          // so it didn't stop anything.
+          try { stopBleScanning(); } catch {}
+          return;
+        }
+        startedByThisScreenRef.current = true;
+        warmupTimer = setTimeout(() => {
+          if (!cancelled) setWarmingUp(false);
+        }, SCANNER_WARMUP_MS);
+      } catch (err: any) {
+        if (cancelled) return;
+        setWarmingUp(false);
+        const code = err?.code || err?.userInfo?.code;
+        const msg = err?.message || 'Background scanning could not start.';
+        console.warn('[addnode] startBleScanning failed:', code, msg);
+        // Same alert shape LiveMap uses for this code — keeps the
+        // "Open Settings" remediation consistent across entry points.
+        if (code === 'BLE_SERVICE_NOT_RUNNING') {
+          Alert.alert(
+            'Scanning unavailable',
+            `${msg}\n\nTap Open Settings to grant the required permissions.`,
+            [
+              { text: 'Dismiss', style: 'cancel' },
+              { text: 'Open Settings', onPress: () => Linking.openSettings() },
+            ],
+          );
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      clearInterval(pollTimer);
+      if (warmupTimer) clearTimeout(warmupTimer);
+      // Only stop if we were the originator. An onboarding-path user who
+      // claims a node and leaves the screen ends up with no scanner running
+      // (correct — they may sit idle in Onboarding until pull-to-refresh
+      // sees the new node and MainGate flips to AuthTabs, at which point
+      // LiveMap will restart it). A skipped-onboarding user keeps LiveMap's
+      // scanner alive since we never touched it.
+      if (startedByThisScreenRef.current) {
+        stopBleScanning();
+        startedByThisScreenRef.current = false;
+      }
+    };
+  }, [refresh, canPairNode]);
 
   const onPullRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -75,7 +194,7 @@ export default function AddNodeScreen() {
 
   const s = styles(colors);
 
-  if (!c.canPairNode) {
+  if (!canPairNode) {
     return (
       <ScrollView style={s.page} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
         <Text style={s.title}>ADD NODE</Text>
@@ -89,6 +208,9 @@ export default function AddNodeScreen() {
     );
   }
 
+  // Render priority: nodes found > warming up > nothing in range.
+  const showWarmup = warmingUp && unclaimed.length === 0;
+
   return (
     <ScrollView
       style={s.page}
@@ -99,17 +221,23 @@ export default function AddNodeScreen() {
     >
       <Text style={s.title}>ADD NODE</Text>
       <Text style={s.subtitle}>
-        {unclaimed.length === 0
-          ? 'Scanning for nearby Westshore Watch nodes…'
-          : `${unclaimed.length} unclaimed node${unclaimed.length !== 1 ? 's' : ''} nearby`}
+        {unclaimed.length > 0
+          ? `${unclaimed.length} unclaimed node${unclaimed.length !== 1 ? 's' : ''} nearby`
+          : showWarmup
+            ? 'Starting scanner…'
+            : 'Scanning for nearby Westshore Watch nodes…'}
       </Text>
 
       {unclaimed.length === 0 && (
         <View style={s.empty}>
           <ActivityIndicator color={colors.cyan} />
-          <Text style={s.emptyText}>NO NODES IN RANGE</Text>
+          <Text style={s.emptyText}>
+            {showWarmup ? 'STARTING SCANNER…' : 'NO NODES IN RANGE'}
+          </Text>
           <Text style={s.emptyHint}>
-            Power on your node and wait a moment. Pull down to refresh.
+            {showWarmup
+              ? 'Initializing Bluetooth. This takes a couple of seconds.'
+              : 'Power on your node and wait a moment. Pull down to refresh.'}
           </Text>
         </View>
       )}
