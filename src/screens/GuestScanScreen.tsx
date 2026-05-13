@@ -39,10 +39,17 @@ export default function GuestScanScreen({ navigation }: any) {
   const { bleDrones, updateBleDrone, nearbyNodes } = useDroneStore();
   const updateNearbyNode = useDroneStore(s => s.updateNearbyNode);
   const [selectedDrone, setSelectedDrone] = useState<DroneEntry | null>(null);
+  const [sheetCollapsed, setSheetCollapsed] = useState(false);
+  // Set true by a marker's onSelected so MapView.onPress doesn't immediately
+  // undo the selection on the same tap.
+  const featureTappedRef = useRef(false);
   const [locationGranted, setLocationGranted] = useState(false);
   const cameraRef = useRef<MapboxGL.Camera>(null);
 
   const droneList = Object.values(bleDrones);
+  const selectedId = selectedDrone
+    ? ((selectedDrone as any).uasId || (selectedDrone as any).uas_id || selectedDrone.mac)
+    : null;
 
   useEffect(() => {
     requestPermissions();
@@ -79,7 +86,17 @@ export default function GuestScanScreen({ navigation }: any) {
   return (
     <View style={s.container}>
       {/* Map */}
-      <MapboxGL.MapView style={StyleSheet.absoluteFill} styleURL={MapboxGL.StyleURL.Dark}>
+      <MapboxGL.MapView
+        style={StyleSheet.absoluteFill}
+        styleURL={MapboxGL.StyleURL.Dark}
+        onPress={() => {
+          if (featureTappedRef.current) {
+            featureTappedRef.current = false;
+            return;
+          }
+          if (selectedDrone) setSelectedDrone(null);
+        }}
+      >
         <MapboxGL.Camera
           ref={cameraRef}
           followUserLocation={!selectedDrone}
@@ -94,24 +111,34 @@ export default function GuestScanScreen({ navigation }: any) {
           const id = drone.uasId || drone.uas_id || drone.mac;
           const color = getDroneColor(id);
           const airborne = drone.status === OP_STATUS_AIRBORNE;
+          const markerOpacity = selectedId == null || selectedId === id ? 1 : 0.5;
           return (
             <MapboxGL.PointAnnotation
               key={id}
               id={id}
               coordinate={[drone.lon, drone.lat]}
-              onSelected={() => setSelectedDrone(drone)}
+              onSelected={() => {
+                featureTappedRef.current = true;
+                if (selectedId === id) {
+                  setSelectedDrone(null);
+                  return;
+                }
+                setSelectedDrone(drone);
+                setSheetCollapsed(false);
+              }}
             >
-              <View style={[s.droneMarker, { borderColor: color, backgroundColor: color + '33' }]}>
+              <View style={[s.droneMarker, { borderColor: color, backgroundColor: color + '33', opacity: markerOpacity }]}>
                 <View style={[s.droneCore, { backgroundColor: color }]} />
               </View>
             </MapboxGL.PointAnnotation>
           );
         })}
 
-        {/* Flight paths */}
+        {/* Flight path — only the selected drone's path renders. */}
         {droneList.map((drone: any) => {
           if (drone.path.length < 2) return null;
           const id = drone.uasId || drone.uas_id || drone.mac;
+          if (id !== selectedId) return null;
           const color = getDroneColor(id);
           const coords = drone.path.map((p: any) => [p.lon, p.lat]);
           return (
@@ -166,7 +193,12 @@ export default function GuestScanScreen({ navigation }: any) {
                 key={id}
                 style={[s.droneRow, selId === id && { borderLeftColor: color, borderLeftWidth: 3 }]}
                 onPress={() => {
+                  if (selId === id) {
+                    setSelectedDrone(null);
+                    return;
+                  }
                   setSelectedDrone(drone);
+                  setSheetCollapsed(false);
                   if (drone.lat && drone.lon) {
                     cameraRef.current?.setCamera({
                       centerCoordinate: [drone.lon, drone.lat],
@@ -191,22 +223,37 @@ export default function GuestScanScreen({ navigation }: any) {
 
       {/* Selected drone detail sheet */}
       {selectedDrone && (
-        <View style={s.detailSheet}>
-          <TouchableOpacity style={s.sheetClose} onPress={() => setSelectedDrone(null)}>
+        <View style={[s.detailSheet, sheetCollapsed && s.detailSheetCollapsed]}>
+          <TouchableOpacity
+            style={s.sheetClose}
+            onPress={() => setSelectedDrone(null)}
+            hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
+          >
             <Text style={s.sheetCloseText}>✕</Text>
           </TouchableOpacity>
-          <Text style={s.detailId}>{selectedDrone.uasId || selectedDrone.mac}</Text>
-          <View style={s.detailGrid}>
-            <DetailRow label="POSITION" value={selectedDrone.lat ? `${selectedDrone.lat.toFixed(6)}, ${selectedDrone.lon!.toFixed(6)}` : '—'} />
-            <DetailRow label="ALTITUDE" value={selectedDrone.altGeo != null ? `${Math.round(selectedDrone.altGeo * 3.28084)}ft MSL` : '—'} />
-            <DetailRow label="SPEED" value={selectedDrone.speedHoriz != null ? `${(selectedDrone.speedHoriz * 2.237).toFixed(1)}mph` : '—'} />
-            <DetailRow label="HEADING" value={selectedDrone.heading != null ? `${Math.round(selectedDrone.heading)}°` : '—'} />
-            <DetailRow label="OPERATOR" value={selectedDrone.opLat ? `${selectedDrone.opLat.toFixed(6)}, ${selectedDrone.opLon!.toFixed(6)}` : '—'} />
-            <DetailRow label="SIGNAL" value={`${selectedDrone.rssi}dBm`} />
-          </View>
-          <View style={s.detailFooter}>
-            <Text style={s.detailFooterText}>Sign in for deployment management and cloud history</Text>
-          </View>
+          <TouchableOpacity
+            style={s.sheetCollapse}
+            onPress={() => setSheetCollapsed(prev => !prev)}
+            hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
+          >
+            <Text style={s.sheetCloseText}>{sheetCollapsed ? '⌃' : '⌄'}</Text>
+          </TouchableOpacity>
+          <Text style={[s.detailId, { paddingRight: 72 }]} numberOfLines={1}>{selectedDrone.uasId || selectedDrone.mac}</Text>
+          {!sheetCollapsed && (
+            <>
+              <View style={s.detailGrid}>
+                <DetailRow label="POSITION" value={selectedDrone.lat ? `${selectedDrone.lat.toFixed(6)}, ${selectedDrone.lon!.toFixed(6)}` : '—'} />
+                <DetailRow label="ALTITUDE" value={selectedDrone.altGeo != null ? `${Math.round(selectedDrone.altGeo * 3.28084)}ft MSL` : '—'} />
+                <DetailRow label="SPEED" value={selectedDrone.speedHoriz != null ? `${(selectedDrone.speedHoriz * 2.237).toFixed(1)}mph` : '—'} />
+                <DetailRow label="HEADING" value={selectedDrone.heading != null ? `${Math.round(selectedDrone.heading)}°` : '—'} />
+                <DetailRow label="OPERATOR" value={selectedDrone.opLat ? `${selectedDrone.opLat.toFixed(6)}, ${selectedDrone.opLon!.toFixed(6)}` : '—'} />
+                <DetailRow label="SIGNAL" value={`${selectedDrone.rssi}dBm`} />
+              </View>
+              <View style={s.detailFooter}>
+                <Text style={s.detailFooterText}>Sign in for deployment management and cloud history</Text>
+              </View>
+            </>
+          )}
         </View>
       )}
     </View>
@@ -294,7 +341,9 @@ const styles = (c: ReturnType<typeof useTheme>) => StyleSheet.create({
     borderTopWidth: 1, borderColor: 'rgba(30,45,69,0.8)',
     padding: 20, paddingBottom: Platform.OS === 'ios' ? 36 : 20,
   },
-  sheetClose: { position: 'absolute', right: 20, top: 20 },
+  detailSheetCollapsed: { paddingBottom: Platform.OS === 'ios' ? 28 : 16 },
+  sheetClose: { position: 'absolute', right: 20, top: 20, padding: 4 },
+  sheetCollapse: { position: 'absolute', right: 52, top: 20, padding: 4 },
   sheetCloseText: { color: '#64748b', fontSize: 16 },
   detailId: {
     color: '#00d4ff', fontSize: 14, fontWeight: '600', marginBottom: 16,

@@ -106,12 +106,19 @@ export default function LiveMapScreen() {
   }, []);
 
   const [selectedDrone, setSelectedDrone] = useState<any>(null);
+  const [sheetCollapsed, setSheetCollapsed] = useState(false);
+  // Set by the drone marker's onPress so a tap that hits a feature doesn't
+  // also fire the MapView's onPress and immediately clear the selection.
+  const featureTappedRef = useRef(false);
   const [showPausedBanner, setShowPausedBanner] = useState(false);
   const wsRef = useRef<ReconnectingWebSocket | null>(null);
   const cameraRef = useRef<MapboxGL.Camera>(null);
   const timeouts = useRef<Record<string, any>>({});
 
   const droneList = Object.values(backendDrones);
+  const selectedId = selectedDrone
+    ? (selectedDrone.uasId || selectedDrone.uas_id || selectedDrone.mac)
+    : null;
 
   // Heartbeat is now driven by the native FG service (NodeHeartbeatUploader).
   // Living in Kotlin lets it survive Android Doze, so nodes stay "online" on
@@ -340,7 +347,17 @@ export default function LiveMapScreen() {
 
   return (
     <View style={s.container}>
-      <MapboxGL.MapView style={StyleSheet.absoluteFill} styleURL={MapboxGL.StyleURL.Dark}>
+      <MapboxGL.MapView
+        style={StyleSheet.absoluteFill}
+        styleURL={MapboxGL.StyleURL.Dark}
+        onPress={() => {
+          if (featureTappedRef.current) {
+            featureTappedRef.current = false;
+            return;
+          }
+          if (selectedDrone) setSelectedDrone(null);
+        }}
+      >
         <MapboxGL.Camera
           ref={cameraRef}
           followUserLocation={!selectedDrone}
@@ -366,9 +383,10 @@ export default function LiveMapScreen() {
           );
         })}
 
-        {/* Drone flight path polylines */}
+        {/* Drone flight path polyline — only the selected drone's path renders. */}
         {droneList.map((drone: any) => {
           const id = drone.uasId || drone.uas_id || drone.mac;
+          if (id !== selectedId) return null;
           const path = drone.path as { lat: number; lon: number }[] | undefined;
           if (!path || path.length < 2) return null;
           const coords = path.map(p => [p.lon, p.lat]);
@@ -409,16 +427,25 @@ export default function LiveMapScreen() {
                     heading: hdg,
                     color: getDroneColor(id),
                     label: nicknames[d.uasId || d.uas_id] || d.uasId || d.uas_id || id.slice(-5),
+                    opacity: selectedId == null || selectedId === id ? 1.0 : 0.5,
                   },
                 };
               }),
           }}
           onPress={(e: any) => {
+            featureTappedRef.current = true;
             const feature = e.features?.[0];
             if (!feature) return;
             const droneId = feature.properties?.droneId;
+            if (selectedId === droneId) {
+              setSelectedDrone(null);
+              return;
+            }
             const drone = droneList.find((d: any) => (d.uasId || d.uas_id || d.mac) === droneId);
-            if (drone) setSelectedDrone(drone);
+            if (drone) {
+              setSelectedDrone(drone);
+              setSheetCollapsed(false);
+            }
           }}
         >
           <MapboxGL.SymbolLayer
@@ -429,6 +456,7 @@ export default function LiveMapScreen() {
               textColor: ['get', 'color'],
               textHaloColor: ['get', 'color'],
               textHaloWidth: 1,
+              textOpacity: ['get', 'opacity'],
               textAllowOverlap: true,
               textIgnorePlacement: true,
               textFont: ['Arial Unicode MS Regular'],
@@ -441,6 +469,7 @@ export default function LiveMapScreen() {
               textSize: 10,
               textColor: ['get', 'color'],
               textOffset: [0, 1.8],
+              textOpacity: ['get', 'opacity'],
               textAllowOverlap: true,
               textFont: ['DIN Pro Medium', 'Arial Unicode MS Regular'],
             }}
@@ -566,7 +595,7 @@ export default function LiveMapScreen() {
         const nickname = nicknames[uasId] || '';
 
         return (
-          <View style={s.detailSheet}>
+          <View style={[s.detailSheet, sheetCollapsed && s.detailSheetCollapsed]}>
             <TouchableOpacity
               style={s.sheetClose}
               onPress={() => setSelectedDrone(null)}
@@ -575,37 +604,49 @@ export default function LiveMapScreen() {
             >
               <Text style={s.sheetCloseText}>✕</Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={s.sheetCollapse}
+              onPress={() => setSheetCollapsed(prev => !prev)}
+              hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
+              activeOpacity={0.6}
+            >
+              <Text style={s.sheetCloseText}>{sheetCollapsed ? '⌃' : '⌄'}</Text>
+            </TouchableOpacity>
             {nickname ? (
-              <View style={{ marginBottom: 4 }}>
-                <Text style={s.detailNickname}>{nickname}</Text>
-                <Text style={s.detailIdSmall}>{uasId}</Text>
+              <View style={{ marginBottom: 4, paddingRight: 72 }}>
+                <Text style={s.detailNickname} numberOfLines={1}>{nickname}</Text>
+                <Text style={s.detailIdSmall} numberOfLines={1}>{uasId}</Text>
               </View>
             ) : (
-              <Text style={s.detailId}>{uasId}</Text>
+              <Text style={[s.detailId, { paddingRight: 72 }]} numberOfLines={1}>{uasId}</Text>
             )}
-            <TextInput
-              style={s.nicknameInput}
-              value={nickname}
-              onChangeText={c.canEditDrone ? (text) => setNickname(uasId, text) : undefined}
-              editable={c.canEditDrone}
-              placeholder={c.canEditDrone ? 'Add nickname...' : ''}
-              placeholderTextColor={colors.textMuted}
-              maxLength={30}
-            />
-            <View style={s.detailGrid}>
-              {[
-                ['POSITION', dLat != null ? `${Number(dLat).toFixed(6)}, ${Number(dLon).toFixed(6)}` : '—'],
-                ['ALTITUDE', dAlt != null ? `${Math.round(dAlt * 3.28084)}ft MSL` : '—'],
-                ['SPEED', dSpeed != null ? `${(dSpeed * 2.237).toFixed(1)}mph` : '—'],
-                ['OPERATOR', dOpLat != null ? `${Number(dOpLat).toFixed(6)}, ${Number(dOpLon).toFixed(6)}` : '—'],
-                ['NODE', nodeName],
-              ].map(([label, value]) => (
-                <View key={label} style={s.detailRow}>
-                  <Text style={s.detailLabel}>{label}</Text>
-                  <Text style={s.detailValue}>{value}</Text>
+            {!sheetCollapsed && (
+              <>
+                <TextInput
+                  style={s.nicknameInput}
+                  value={nickname}
+                  onChangeText={c.canEditDrone ? (text) => setNickname(uasId, text) : undefined}
+                  editable={c.canEditDrone}
+                  placeholder={c.canEditDrone ? 'Add nickname...' : ''}
+                  placeholderTextColor={colors.textMuted}
+                  maxLength={30}
+                />
+                <View style={s.detailGrid}>
+                  {[
+                    ['POSITION', dLat != null ? `${Number(dLat).toFixed(6)}, ${Number(dLon).toFixed(6)}` : '—'],
+                    ['ALTITUDE', dAlt != null ? `${Math.round(dAlt * 3.28084)}ft MSL` : '—'],
+                    ['SPEED', dSpeed != null ? `${(dSpeed * 2.237).toFixed(1)}mph` : '—'],
+                    ['OPERATOR', dOpLat != null ? `${Number(dOpLat).toFixed(6)}, ${Number(dOpLon).toFixed(6)}` : '—'],
+                    ['NODE', nodeName],
+                  ].map(([label, value]) => (
+                    <View key={label} style={s.detailRow}>
+                      <Text style={s.detailLabel}>{label}</Text>
+                      <Text style={s.detailValue}>{value}</Text>
+                    </View>
+                  ))}
                 </View>
-              ))}
-            </View>
+              </>
+            )}
           </View>
         );
       })()}
@@ -700,7 +741,9 @@ const styles = (c: ReturnType<typeof useTheme>) => StyleSheet.create({
     borderTopWidth: 1, borderColor: c.border,
     padding: 20, paddingBottom: Platform.OS === 'ios' ? 36 : 20,
   },
+  detailSheetCollapsed: { paddingBottom: Platform.OS === 'ios' ? 28 : 16 },
   sheetClose: { position: 'absolute', right: 16, top: 16, padding: 8 },
+  sheetCollapse: { position: 'absolute', right: 52, top: 16, padding: 8 },
   sheetCloseText: { color: c.textMuted, fontSize: 20, fontWeight: '700' },
   detailNickname: {
     color: c.cyan, fontSize: 18, fontWeight: '700',
