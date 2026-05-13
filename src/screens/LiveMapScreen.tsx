@@ -670,30 +670,36 @@ export default function LiveMapScreen() {
 
         return (
           <View style={[s.detailSheet, sheetCollapsed && s.detailSheetCollapsed]}>
-            <TouchableOpacity
-              style={s.sheetClose}
-              onPress={() => setSelectedDrone(null)}
-              hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
-              activeOpacity={0.6}
-            >
-              <Text style={s.sheetCloseText}>✕</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={s.sheetCollapse}
-              onPress={() => setSheetCollapsed(prev => !prev)}
-              hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
-              activeOpacity={0.6}
-            >
-              <Text style={s.sheetCloseText}>{sheetCollapsed ? '⌃' : '⌄'}</Text>
-            </TouchableOpacity>
-            {nickname ? (
-              <View style={{ marginBottom: 4, paddingRight: 72 }}>
-                <Text style={s.detailNickname} numberOfLines={1}>{nickname}</Text>
-                <Text style={s.detailIdSmall} numberOfLines={1}>{uasId}</Text>
-              </View>
-            ) : (
-              <Text style={[s.detailId, { paddingRight: 72 }]} numberOfLines={1}>{uasId}</Text>
-            )}
+            {/* Header row: title flexes; V + X sit in normal flow on the
+                same line. Their hit regions can no longer reach down into
+                the nickname TextInput below, which was causing taps on X
+                to open the keyboard instead of dismissing the sheet. */}
+            <View style={s.sheetHeaderRow}>
+              {nickname ? (
+                <View style={{ flex: 1, marginRight: 12 }}>
+                  <Text style={s.detailNickname} numberOfLines={1}>{nickname}</Text>
+                  <Text style={s.detailIdSmall} numberOfLines={1}>{uasId}</Text>
+                </View>
+              ) : (
+                <Text style={[s.detailId, { flex: 1, marginRight: 12, marginBottom: 0 }]} numberOfLines={1}>{uasId}</Text>
+              )}
+              <TouchableOpacity
+                style={s.sheetControlBtn}
+                onPress={() => setSheetCollapsed(prev => !prev)}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                activeOpacity={0.6}
+              >
+                <Text style={s.sheetCloseText}>{sheetCollapsed ? '⌃' : '⌄'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={s.sheetControlBtn}
+                onPress={() => setSelectedDrone(null)}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                activeOpacity={0.6}
+              >
+                <Text style={s.sheetCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
             {!sheetCollapsed && (
               <>
                 <TextInput
@@ -839,8 +845,14 @@ const styles = (c: ReturnType<typeof useTheme>) => StyleSheet.create({
     padding: 20, paddingBottom: Platform.OS === 'ios' ? 36 : 20,
   },
   detailSheetCollapsed: { paddingBottom: Platform.OS === 'ios' ? 28 : 16 },
-  sheetClose: { position: 'absolute', right: 16, top: 16, padding: 8 },
-  sheetCollapse: { position: 'absolute', right: 52, top: 16, padding: 8 },
+  // Header row puts dismiss controls in normal flow next to the title so
+  // their tap regions can't overlap the nickname TextInput below. The
+  // previous absolute-positioned V/X had hitSlop reaching into the input's
+  // focus area, hijacking taps as keyboard-open events.
+  sheetHeaderRow: {
+    flexDirection: 'row', alignItems: 'center', marginBottom: 12,
+  },
+  sheetControlBtn: { padding: 8, marginLeft: 4 },
   sheetCloseText: { color: c.textMuted, fontSize: 20, fontWeight: '700' },
   detailNickname: {
     color: c.cyan, fontSize: 18, fontWeight: '700',
