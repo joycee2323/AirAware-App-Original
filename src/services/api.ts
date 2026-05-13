@@ -118,6 +118,10 @@ export const api = {
   // Detections
   getDetections: (deploymentId: string) =>
     request('GET', `/detections/${deploymentId}`),
+  // Org-wide recent detections, used by the Live Map's passive view when no
+  // deployment is active. Server clamps `minutes` to [1, 60]; default 5.
+  getRecentDetections: (minutes: number = 5) =>
+    request('GET', `/detections/recent?minutes=${encodeURIComponent(String(minutes))}`),
   deleteDrone: (deploymentId: string, uasId: string) =>
     request('DELETE', `/detections/${deploymentId}/${encodeURIComponent(uasId)}`),
 

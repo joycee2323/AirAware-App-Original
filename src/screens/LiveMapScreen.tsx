@@ -95,6 +95,11 @@ export default function LiveMapScreen() {
   // user has registered ANY node across their account (drives the empty-state
   // banner for users who skipped onboarding).
   const [userHasAnyNode, setUserHasAnyNode] = useState<boolean | null>(null);
+  // Mirrored into a ref so the passive-mode poll callback (a stable closure
+  // captured by setInterval) can re-check the flag each tick without re-
+  // subscribing to React state changes.
+  const userHasAnyNodeRef = useRef<boolean | null>(null);
+  useEffect(() => { userHasAnyNodeRef.current = userHasAnyNode; }, [userHasAnyNode]);
 
   const checkUserNodes = useCallback(async () => {
     try {
@@ -111,11 +116,25 @@ export default function LiveMapScreen() {
   // also fire the MapView's onPress and immediately clear the selection.
   const featureTappedRef = useRef(false);
   const [showPausedBanner, setShowPausedBanner] = useState(false);
+  // Passive mode: when no deployment is active, render recent (last 5 min)
+  // detections + all org nodes so a push notification has a visual landing
+  // pad. Stored in local state (not the droneStore) to avoid racing with
+  // the global 60s eviction sweep — refetched wholesale every PASSIVE_POLL_MS.
+  const [passiveDrones, setPassiveDrones] = useState<any[]>([]);
+  const [passiveNodes, setPassiveNodes] = useState<any[]>([]);
+  const passivePollTimer = useRef<any>(null);
+  const PASSIVE_RECENCY_MIN = 5;
+  const PASSIVE_POLL_MS = 30_000;
+
+  const isPassive = !activeDeployment;
   const wsRef = useRef<ReconnectingWebSocket | null>(null);
   const cameraRef = useRef<MapboxGL.Camera>(null);
   const timeouts = useRef<Record<string, any>>({});
 
-  const droneList = Object.values(backendDrones);
+  const droneList = isPassive
+    ? passiveDrones.filter(d => d.last_seen && (Date.now() - new Date(d.last_seen).getTime()) < PASSIVE_RECENCY_MIN * 60_000)
+    : Object.values(backendDrones);
+  const nodesToRender = isPassive ? passiveNodes : nodes;
   const selectedId = selectedDrone
     ? (selectedDrone.uasId || selectedDrone.uas_id || selectedDrone.mac)
     : null;
@@ -197,6 +216,7 @@ export default function LiveMapScreen() {
       wsRef.current?.close();
       stopBleScanning();
       if (refetchDebounceTimer.current) clearTimeout(refetchDebounceTimer.current);
+      if (passivePollTimer.current) clearInterval(passivePollTimer.current);
       // Cancel any pending nickname-save debounces. The pending edits will
       // be lost; on next mount, the server-side state hydrates via getDroneNicknames.
       Object.values(nicknameSaveTimers.current).forEach(t => clearTimeout(t));
@@ -281,11 +301,43 @@ export default function LiveMapScreen() {
           .filter((d: any) => d.last_seen && new Date(d.last_seen).getTime() > cutoff)
           .forEach((d: any) => updateBackendDrone(d));
         await refetchNodes(active);
+      } else {
+        // Passive view — no managed deployment, but the org may have a
+        // continuous Sentinel deployment running elsewhere. Show its
+        // recent detections + all org nodes so push notifications have
+        // somewhere to point.
+        startPassivePolling();
       }
     } catch (err) {
       console.warn('Failed to load deployment:', err);
     }
   };
+
+  // Polls recent org-wide detections + all org nodes every PASSIVE_POLL_MS.
+  // Gated on userHasAnyNode === true at call time — checkUserNodes resolves
+  // before this runs (both kicked off from the mount effect), so a new
+  // account with no nodes never hits the network here.
+  const startPassivePolling = useCallback(() => {
+    const poll = async () => {
+      // Skip while the user has no nodes (incl. while the initial check is
+      // still in flight, userHasAnyNodeRef === null). Re-checked each tick so
+      // adding a node later starts populating the view without a remount.
+      if (userHasAnyNodeRef.current !== true) return;
+      try {
+        const [dets, nodeList] = await Promise.all([
+          api.getRecentDetections(PASSIVE_RECENCY_MIN),
+          api.getNodes(),
+        ]);
+        setPassiveDrones(Array.isArray(dets) ? dets : []);
+        setPassiveNodes(Array.isArray(nodeList) ? nodeList : []);
+      } catch (err) {
+        console.warn('[passive] poll failed:', err);
+      }
+    };
+    void poll();
+    if (passivePollTimer.current) clearInterval(passivePollTimer.current);
+    passivePollTimer.current = setInterval(poll, PASSIVE_POLL_MS);
+  }, []);
 
   const connectWebSocket = useCallback((deploymentId: string) => {
     const ws = createWebSocket(deploymentId, (msg) => {
@@ -367,7 +419,7 @@ export default function LiveMapScreen() {
         <MapboxGL.UserLocation />
 
         {/* Node markers */}
-        {nodes.map(node => {
+        {nodesToRender.map(node => {
           if (!node.last_lat || !node.last_lon) return null;
           const online = node.status === 'online';
           return (
@@ -427,7 +479,8 @@ export default function LiveMapScreen() {
                     heading: hdg,
                     color: getDroneColor(id),
                     label: nicknames[d.uasId || d.uas_id] || d.uasId || d.uas_id || id.slice(-5),
-                    opacity: selectedId == null || selectedId === id ? 1.0 : 0.5,
+                    opacity: (isPassive ? 0.6 : 1.0) *
+                      (selectedId == null || selectedId === id ? 1.0 : 0.5),
                   },
                 };
               }),
@@ -525,6 +578,9 @@ export default function LiveMapScreen() {
           {activeDeployment && (
             <Text style={s.depName}>▸ {activeDeployment.name}</Text>
           )}
+          {isPassive && (
+            <Text style={s.passiveBadge}>◌ PASSIVE</Text>
+          )}
           {nearbyNodeCount > 0 && (
             <Text style={s.nodeNearby}>📡 NODE IN RANGE</Text>
           )}
@@ -537,7 +593,7 @@ export default function LiveMapScreen() {
           </View>
           <View style={s.stat}>
             <Text style={[s.statVal, { color: colors.green }]}>
-              {nodes.filter(n => n.last_lat && n.last_lon && n.last_seen && (Date.now() - new Date(n.last_seen).getTime() < 120000)).length}
+              {nodesToRender.filter(n => n.last_lat && n.last_lon && n.last_seen && (Date.now() - new Date(n.last_seen).getTime() < 120000)).length}
             </Text>
             <Text style={s.statLabel}>NODES</Text>
           </View>
@@ -556,6 +612,24 @@ export default function LiveMapScreen() {
             <Text style={s.noNodesSub}>Register a node to start detecting drones</Text>
           </View>
           <Text style={s.noNodesArrow}>→</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Passive mode banner — shown when no deployment is active but the
+          user has nodes. Mutually exclusive with the no-nodes banner. */}
+      {isPassive && userHasAnyNode === true && (
+        <TouchableOpacity
+          style={s.passiveBanner}
+          onPress={() => navigation.navigate('Deployments')}
+          activeOpacity={0.8}
+        >
+          <View style={{ flex: 1 }}>
+            <Text style={s.passiveTitle}>NO ACTIVE DEPLOYMENT</Text>
+            <Text style={s.passiveSub}>
+              Showing recent detections from your nodes (last {PASSIVE_RECENCY_MIN} min)
+            </Text>
+          </View>
+          <Text style={s.passiveArrow}>→</Text>
         </TouchableOpacity>
       )}
 
@@ -707,6 +781,29 @@ const styles = (c: ReturnType<typeof useTheme>) => StyleSheet.create({
   },
   noNodesArrow: {
     color: c.cyan, fontSize: 18, fontWeight: '700', marginLeft: 12,
+  },
+  passiveBanner: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 120 : 104,
+    left: 16, right: 16,
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 10, paddingHorizontal: 14,
+    borderRadius: 10, borderWidth: 1, borderColor: c.textMuted,
+    backgroundColor: 'rgba(150,150,150,0.10)',
+  },
+  passiveTitle: {
+    color: c.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 2,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+  },
+  passiveSub: {
+    color: c.textDim, fontSize: 10, marginTop: 2,
+  },
+  passiveArrow: {
+    color: c.textMuted, fontSize: 18, fontWeight: '700', marginLeft: 12,
+  },
+  passiveBadge: {
+    color: c.textMuted, fontSize: 9, marginTop: 2, letterSpacing: 2,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
   },
   bgLocBanner: {
     position: 'absolute',
