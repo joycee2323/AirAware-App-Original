@@ -133,6 +133,15 @@ class BLEScannerModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun getWatchdogStats(promise: Promise) {
+        try {
+            promise.resolve(BLEScannerService.watchdogStats())
+        } catch (e: Throwable) {
+            promise.reject("BLE_WATCHDOG_STATS_FAILED", e)
+        }
+    }
+
+    @ReactMethod
     fun stopService(promise: Promise) {
         try {
             val ctx = reactApplicationContext

@@ -56,17 +56,59 @@ class BLEScannerService : Service() {
     @Volatile
     private var lastPacketElapsedMs: Long = 0L
 
-    private val watchdogRunnable = object : Runnable {
+    // Self-heal counters/timers. Both watchdogs run on the same 5s tick on
+    // workHandler; per-watchdog backoff prevents reinit loops when the
+    // underlying fault persists. Exposed to JS via BLEScannerModule for the
+    // in-app debug view.
+    @Volatile private var bleReinitCount: Int = 0
+    @Volatile private var lastBleReinitElapsedMs: Long = 0L
+    @Volatile private var lastUploaderReinitElapsedMs: Long = 0L
+
+    private val selfHealRunnable = object : Runnable {
         override fun run() {
-            if (!scanning) return
-            val idleMs = SystemClock.elapsedRealtime() - lastPacketElapsedMs
-            if (idleMs >= WATCHDOG_SILENCE_THRESHOLD_MS) {
-                Log.d(TAG, "watchdog idle ${idleMs}ms, restarting scan")
-                stopScan()
-                startScan()
+            val workHandler = handler
+            if (workHandler == null) return
+            val now = SystemClock.elapsedRealtime()
+
+            // BLE leg — restart scan if no callback in SILENCE_MS and we
+            // haven't just restarted. Idle gate: only fires while scanning.
+            if (scanning) {
+                val bleIdleMs = now - lastPacketElapsedMs
+                val sinceLastBleReinit = now - lastBleReinitElapsedMs
+                if (bleIdleMs >= BLE_SILENCE_THRESHOLD_MS && sinceLastBleReinit >= REINIT_BACKOFF_MS) {
+                    Log.w(TAG, "no BLE callbacks in ${bleIdleMs}ms, restarting scan")
+                    bleReinitCount += 1
+                    lastBleReinitElapsedMs = now
+                    restartBleScan()
+                }
             }
-            handler?.postDelayed(this, WATCHDOG_CHECK_INTERVAL_MS)
+
+            // Uploader leg — force a reinit if we've got something queued
+            // but POSTs haven't succeeded in UPLOAD_STALL_MS. Idle gate
+            // (queue empty, not configured, 402 backoff) lives in
+            // DetectionUploader.isUploaderIdle().
+            val up = uploader
+            if (up != null && !up.isUploaderIdle()) {
+                val staleMs = now - up.lastSuccessElapsedMs()
+                val sinceLastUploaderReinit = now - lastUploaderReinitElapsedMs
+                if (staleMs >= UPLOAD_STALL_THRESHOLD_MS && sinceLastUploaderReinit >= REINIT_BACKOFF_MS) {
+                    lastUploaderReinitElapsedMs = now
+                    up.reinitForStall("no successful upload in ${staleMs}ms, queued=${up.queueSize()}")
+                }
+            }
+
+            workHandler.postDelayed(this, SELF_HEAL_TICK_MS)
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun restartBleScan() {
+        val h = handler ?: return
+        stopScan()
+        // Brief gap so the controller has a chance to clean up before
+        // accepting startScan again — matches the pattern in known stuck-
+        // scanner mitigations.
+        h.postDelayed({ startScan() }, BLE_RESTART_DELAY_MS)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -243,8 +285,8 @@ class BLEScannerService : Service() {
                 scanning = true
                 lastPacketElapsedMs = SystemClock.elapsedRealtime()
                 Log.d(TAG, "startScan: native BLE scan started (ODID filter, balanced) on ${Thread.currentThread().name}")
-                workHandler.removeCallbacks(watchdogRunnable)
-                workHandler.postDelayed(watchdogRunnable, WATCHDOG_CHECK_INTERVAL_MS)
+                workHandler.removeCallbacks(selfHealRunnable)
+                workHandler.postDelayed(selfHealRunnable, SELF_HEAL_TICK_MS)
             } catch (t: Throwable) {
                 Log.e(TAG, "startScan failed: ${t.message}", t)
             }
@@ -253,7 +295,7 @@ class BLEScannerService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun stopScan() {
-        handler?.removeCallbacks(watchdogRunnable)
+        handler?.removeCallbacks(selfHealRunnable)
         val cb = scanCallback
         val s = scanner
         if (scanning && cb != null && s != null) {
@@ -519,10 +561,21 @@ class BLEScannerService : Service() {
         private const val CHANNEL_ID = "westshore_ble_scanner_v2"
         private const val NOTIFICATION_ID = 4471
         private const val WAKE_LOCK_TAG = "WestshoreWatch::BLEScannerService"
-        // Restart only if no packets have arrived for this long (silence watchdog).
-        private const val WATCHDOG_SILENCE_THRESHOLD_MS = 30_000L
-        // How often the watchdog checks for silence.
-        private const val WATCHDOG_CHECK_INTERVAL_MS = 5_000L
+        // BLE: restart scan if no callback at all has arrived for this long.
+        // Kept at 30s — the prior single-purpose watchdog used the same
+        // threshold and we don't want to regress real-world responsiveness.
+        private const val BLE_SILENCE_THRESHOLD_MS = 30_000L
+        // Uploader: force a reinit if queue is non-empty but no 2xx has
+        // arrived in this long.
+        private const val UPLOAD_STALL_THRESHOLD_MS = 30_000L
+        // Minimum delay between back-to-back reinits of the same watchdog.
+        // Prevents loops when the underlying fault persists (e.g. JWT can't
+        // be refreshed yet because the device is offline).
+        private const val REINIT_BACKOFF_MS = 30_000L
+        // Single tick driving both watchdogs.
+        private const val SELF_HEAL_TICK_MS = 5_000L
+        // Gap between stopScan() and startScan() inside restartBleScan().
+        private const val BLE_RESTART_DELAY_MS = 500L
         // How long a BasicId attribution is reused for legacy-path follow-up
         // Location/System messages without their own uasId. Firmware now emits
         // basic_id every cycle (option A in ble_relay.c), so a valid inherit
@@ -546,6 +599,44 @@ class BLEScannerService : Service() {
             UploadConfig.authToken = authToken
             activeInstance?.uploader?.configure(UploadConfig.baseUrl, UploadConfig.authToken)
             activeInstance?.heartbeat?.configure(UploadConfig.baseUrl, UploadConfig.authToken)
+        }
+
+        // Read the current watchdog counters + staleness ages. Returns null
+        // ages when the service isn't running (no scan started, no uploader)
+        // so the JS debug view can render "—" instead of misleading zeros.
+        fun watchdogStats(): WritableMap {
+            val map = Arguments.createMap()
+            val inst = activeInstance
+            val now = SystemClock.elapsedRealtime()
+            if (inst == null) {
+                map.putInt("bleReinitCount", 0)
+                map.putInt("uploaderReinitCount", 0)
+                map.putNull("lastBleCallbackAgeMs")
+                map.putNull("lastUploadSuccessAgeMs")
+                map.putBoolean("scanning", false)
+                return map
+            }
+            map.putInt("bleReinitCount", inst.bleReinitCount)
+            map.putBoolean("scanning", inst.scanning)
+            if (inst.scanning && inst.lastPacketElapsedMs > 0L) {
+                map.putInt("lastBleCallbackAgeMs", (now - inst.lastPacketElapsedMs).toInt())
+            } else {
+                map.putNull("lastBleCallbackAgeMs")
+            }
+            val up = inst.uploader
+            if (up != null) {
+                map.putInt("uploaderReinitCount", up.reinitCount())
+                val ls = up.lastSuccessElapsedMs()
+                if (ls > 0L) {
+                    map.putInt("lastUploadSuccessAgeMs", (now - ls).toInt())
+                } else {
+                    map.putNull("lastUploadSuccessAgeMs")
+                }
+            } else {
+                map.putInt("uploaderReinitCount", 0)
+                map.putNull("lastUploadSuccessAgeMs")
+            }
+            return map
         }
     }
 }

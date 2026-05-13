@@ -1,13 +1,22 @@
-import { NativeModules, NativeEventEmitter, Platform, EmitterSubscription } from 'react-native';
+import { NativeModules, NativeEventEmitter, Platform, EmitterSubscription, DeviceEventEmitter } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { parseOdidAdvertisement, OdidDetection } from './odidParser';
 import { notifyNewDrone } from './droneNotifier';
+
+export interface WatchdogStats {
+  bleReinitCount: number;
+  uploaderReinitCount: number;
+  lastBleCallbackAgeMs: number | null;
+  lastUploadSuccessAgeMs: number | null;
+  scanning: boolean;
+}
 
 const { BLEScanner } = NativeModules as {
   BLEScanner?: {
     startService: () => Promise<void>;
     stopService: () => Promise<void>;
     configure: (config: { baseUrl?: string; authToken?: string | null }) => Promise<void>;
+    getWatchdogStats: () => Promise<WatchdogStats>;
     addListener: (eventName: string) => void;
     removeListeners: (count: number) => void;
   };
@@ -58,6 +67,41 @@ async function stopForegroundService(): Promise<void> {
 
 let scanning = false;
 let subscription: EmitterSubscription | null = null;
+let reinitSubscription: EmitterSubscription | null = null;
+
+// Native uploader emits this when its self-heal watchdog forces a stall
+// reinit. We respond by re-pushing the current JWT, which resets the native
+// authToken state and lets the next flush proceed.
+//
+// NB: This is "re-push the current token", not a real refresh. There's no
+// /auth/refresh endpoint today (see DetectionUploader.kt's TODO). If the
+// token has genuinely expired, this won't help — the next POST will 401 and
+// the auth layer above will need to push the user back through login.
+function attachUploaderReinitListener(): void {
+  if (reinitSubscription) return;
+  reinitSubscription = DeviceEventEmitter.addListener(
+    'UploaderForcedReinit',
+    async (payload: { reason?: string; queued?: number }) => {
+      console.warn('[BLE] UploaderForcedReinit:', payload?.reason, 'queued=', payload?.queued);
+      try {
+        const token = await SecureStore.getItemAsync('auth_token');
+        await configureNativeUpload(token);
+      } catch (e) {
+        console.warn('[BLE] failed to re-push token after UploaderForcedReinit:', e);
+      }
+    },
+  );
+}
+
+export async function getWatchdogStats(): Promise<WatchdogStats | null> {
+  if (Platform.OS !== 'android' || !BLEScanner?.getWatchdogStats) return null;
+  try {
+    return await BLEScanner.getWatchdogStats();
+  } catch (e) {
+    console.warn('[BLE] getWatchdogStats failed:', e);
+    return null;
+  }
+}
 
 export interface DiscoveredNode {
   mac: string;
@@ -186,6 +230,7 @@ export async function startBleScanning(
   // first batch inside the service has what it needs to POST.
   const token = await SecureStore.getItemAsync('auth_token');
   await configureNativeUpload(token);
+  attachUploaderReinitListener();
   await startForegroundService();
   scanning = true;
 }
@@ -194,6 +239,8 @@ export function stopBleScanning(): void {
   if (!scanning) return;
   subscription?.remove();
   subscription = null;
+  reinitSubscription?.remove();
+  reinitSubscription = null;
   scanning = false;
   void stopForegroundService();
 }

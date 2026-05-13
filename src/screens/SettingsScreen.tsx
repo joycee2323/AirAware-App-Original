@@ -15,6 +15,7 @@ import { useTheme } from '../theme';
 import { caps } from '../lib/caps';
 import { useNotificationsStore } from '../store/notificationsStore';
 import { getLastRegistrationStatus, registerForPushNotifications } from '../services/pushNotifications';
+import { getWatchdogStats } from '../services/bleScanner';
 
 // Hardcoded fallback if /api/docs/manual-url is unreachable. Kept in sync
 // with the backend route (src/routes/docs.js) — both must point at the
@@ -68,6 +69,25 @@ export default function SettingsScreen() {
         { text: 'OK' },
         { text: 'Retry registration', onPress: () => { void registerForPushNotifications(); } },
       ],
+    );
+  }, []);
+
+  const handleShowWatchdogDiagnostic = useCallback(async () => {
+    const stats = await getWatchdogStats();
+    if (!stats) {
+      Alert.alert('Watchdog diagnostic', 'BLE service not running yet — start scanning first.');
+      return;
+    }
+    const fmt = (ms: number | null) => ms == null ? '—' : `${(ms / 1000).toFixed(1)}s ago`;
+    Alert.alert(
+      'Watchdog diagnostic',
+      [
+        `Scanning: ${stats.scanning ? 'yes' : 'no'}`,
+        `BLE reinits this session: ${stats.bleReinitCount}`,
+        `Uploader reinits this session: ${stats.uploaderReinitCount}`,
+        `Last BLE callback: ${fmt(stats.lastBleCallbackAgeMs)}`,
+        `Last upload 2xx: ${fmt(stats.lastUploadSuccessAgeMs)}`,
+      ].join('\n'),
     );
   }, []);
 
@@ -268,6 +288,15 @@ export default function SettingsScreen() {
             label="Push diagnostic"
             subtitle="Debug: last registration outcome"
             onPress={handleShowPushDiagnostic}
+            isLast={false}
+          />
+        )}
+        {__DEV__ && (
+          <SettingRow
+            colors={colors}
+            label="Watchdog diagnostic"
+            subtitle="Debug: BLE / uploader self-heal counters"
+            onPress={handleShowWatchdogDiagnostic}
             isLast={true}
           />
         )}

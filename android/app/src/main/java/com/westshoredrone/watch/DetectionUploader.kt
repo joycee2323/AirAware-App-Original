@@ -20,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 // Drives POSTs to /api/nodes/<deviceId>/detections from inside the native
 // foreground service so uploads continue when the JS runtime is suspended in
@@ -47,7 +48,18 @@ class DetectionUploader(private val handler: Handler, private val context: Conte
     // Per-flush cycle gate so the cap warning fires at most once per tick.
     private val capWarnedThisCycle = AtomicBoolean(false)
 
-    private val client: OkHttpClient = OkHttpClient.Builder()
+    // Last 2xx response time, in elapsedRealtime ms. Used by the self-heal
+    // watchdog in BLEScannerService to detect "stuck" uploaders (queue
+    // non-empty but no successful POST in 30s — JWT expired, half-open
+    // socket after WiFi flap, etc.).
+    @Volatile private var lastSuccessElapsedMs: Long = 0L
+    private val reinitCounter = AtomicInteger(0)
+
+    // Replaceable so reinitForStall can swap in a fresh client when the
+    // existing one is wedged (dispatcher stuck, half-open connections).
+    @Volatile private var client: OkHttpClient = buildClient()
+
+    private fun buildClient(): OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
@@ -86,8 +98,72 @@ class DetectionUploader(private val handler: Handler, private val context: Conte
     }
 
     fun start() {
+        // Seed the watchdog's "last success" clock at boot so it doesn't fire
+        // immediately if the queue takes a few seconds to fill — the 30s
+        // staleness window starts ticking from here.
+        lastSuccessElapsedMs = SystemClock.elapsedRealtime()
         handler.removeCallbacks(flushRunnable)
         handler.postDelayed(flushRunnable, FLUSH_INTERVAL_MS)
+    }
+
+    fun lastSuccessElapsedMs(): Long = lastSuccessElapsedMs
+
+    fun reinitCount(): Int = reinitCounter.get()
+
+    fun queueSize(): Int {
+        var total = 0
+        for (bucket in queue.values) total += bucket.size
+        return total
+    }
+
+    // True when the uploader has nothing to do right now: not configured,
+    // queue empty, or sitting out a 402 billing-pause window. The self-heal
+    // watchdog skips firing under these conditions to avoid false reinits
+    // when the user just isn't deployed yet.
+    fun isUploaderIdle(): Boolean {
+        if (queue.isEmpty()) return true
+        if (baseUrl == null || authToken == null) return true
+        if (SystemClock.elapsedRealtime() < pausedUntilElapsedMs) return true
+        return false
+    }
+
+    // Force a clean re-init of the HTTP plumbing. Three failure modes all
+    // recover via this path: (a) JWT silently expired and every POST 401s
+    // forever, (b) BLE-side callbacks died (handled separately, but a stalled
+    // uploader can mask it), (c) WiFi reassociated and the OkHttp connection
+    // pool kept a half-open socket. Cancelling the dispatcher and evicting
+    // pooled connections covers (c); nulling authToken + emitting
+    // UploaderForcedReinit so JS re-pushes the token covers (a).
+    //
+    // TODO: this is "re-push the current JWT", not a real refresh. JS holds
+    // whatever login() returned and there's no /auth/refresh endpoint — if
+    // the token is genuinely expired, re-pushing it doesn't help. Filed
+    // separately as a backend ticket; once /auth/refresh exists, JS should
+    // call it on UploaderForcedReinit before re-configuring.
+    fun reinitForStall(reason: String) {
+        val queued = queueSize()
+        Log.w(TAG, "uploader reinit: $reason, queued=$queued")
+        try {
+            client.dispatcher.cancelAll()
+            client.connectionPool.evictAll()
+        } catch (t: Throwable) {
+            Log.w(TAG, "reinit: cancel/evict failed: ${t.message}")
+        }
+        client = buildClient()
+        // Force JS to re-push the token via the UploaderForcedReinit event.
+        // Until JS responds, flushOnce() holds the queue (authToken == null
+        // path) rather than dropping detections.
+        authToken = null
+        // Reset the watchdog clock so the 30s window restarts now —
+        // otherwise the very next tick could fire a second reinit before JS
+        // has had a chance to reconfigure.
+        lastSuccessElapsedMs = SystemClock.elapsedRealtime()
+        reinitCounter.incrementAndGet()
+        val payload: WritableMap = Arguments.createMap().apply {
+            putString("reason", reason)
+            putInt("queued", queued)
+        }
+        emitEvent("UploaderForcedReinit", payload)
     }
 
     fun stop() {
@@ -185,6 +261,7 @@ class DetectionUploader(private val handler: Handler, private val context: Conte
         try {
             client.newCall(req).execute().use { resp ->
                 if (resp.isSuccessful) {
+                    lastSuccessElapsedMs = SystemClock.elapsedRealtime()
                     Log.i(TAG, "POST ok node=$deviceId drones=${drones.size} status=${resp.code}")
                     // Coming back from a billing pause? Tell JS to drop the
                     // banner and clear backoff so the next flush is immediate.
