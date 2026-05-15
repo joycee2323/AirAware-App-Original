@@ -11,10 +11,6 @@
 -keep class com.swmansion.reanimated.** { *; }
 -keep class com.facebook.react.turbomodule.** { *; }
 
-# react-native-ble-plx — bridges through reflection at the native module layer
--keep class com.bleplx.** { *; }
--dontwarn com.bleplx.**
-
 # @rnmapbox/maps — Mapbox SDK ships consumer-proguard rules in its AAR, these
 # are belt-and-suspenders to keep the JS-bridge module classes intact
 -keep class com.rnmapbox.rnmbx.** { *; }
