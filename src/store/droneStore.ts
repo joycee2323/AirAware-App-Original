@@ -39,6 +39,13 @@ interface DroneStore {
   // tradeoff is that stale drones may linger on the map until the
   // deployment ends; a per-drone freshness indicator is the planned
   // mitigation, not eviction.
+  //
+  // Keyed by `${deployment_id}:${uas_id}` so the same uas_id can appear in
+  // multiple simultaneously-active deployments without overwriting itself.
+  // Use makeBackendDroneKey / parseBackendDroneKey to construct and parse
+  // these keys — do not concatenate inline. Each value carries its own
+  // `deployment_id` and `uas_id` fields from the backend row, so consumers
+  // that iterate `Object.values()` don't need to parse keys.
   backendDrones: Record<string, any>;
   // Per-org nickname overrides keyed by uas_id. Seeded from
   // GET /api/orgs/:id/drone-nicknames on login/screen mount and kept
@@ -49,7 +56,11 @@ interface DroneStore {
   updateBleDrone: (uasId: string, data: Partial<OdidDetection> & { rssi: number }) => void;
   removeDrone: (uasId: string) => void;
   clearBleDrones: () => void;
-  setBackendDrones: (drones: Record<string, any>) => void;
+  // Wholesale replace. Caller passes an array of backend drone rows
+  // (each carrying its own deployment_id + uas_id); the store builds the
+  // compound keys. Currently unused by app code but kept as part of the
+  // public interface for symmetry with updateBackendDrone.
+  setBackendDrones: (drones: any[]) => void;
   updateBackendDrone: (drone: any) => void;
   // Drops every backendDrones entry whose deployment_id matches. Called
   // by LiveMapScreen on mode transitions: entering passive mode (clears
@@ -85,6 +96,21 @@ function coerceBackendNumerics(drone: any): any {
   return next;
 }
 
+// Compound key for backendDrones. The same uas_id can be detected by
+// nodes in two simultaneously active deployments, so a uas_id-only key
+// would lose data on a cross-deployment overlap. ':' is safe as a
+// separator because UAS-ID (Remote ID per CTA-2063-A / FAA Part 89) is
+// alphanumeric / hyphenated and doesn't contain ':'.
+export function makeBackendDroneKey(deploymentId: string, uasId: string): string {
+  return `${deploymentId}:${uasId}`;
+}
+
+export function parseBackendDroneKey(key: string): { deploymentId: string; uasId: string } {
+  const idx = key.indexOf(':');
+  if (idx < 0) return { deploymentId: '', uasId: key };
+  return { deploymentId: key.slice(0, idx), uasId: key.slice(idx + 1) };
+}
+
 export const useDroneStore = create<DroneStore>((set) => ({
   bleDrones: {},
   backendDrones: {},
@@ -97,13 +123,23 @@ export const useDroneStore = create<DroneStore>((set) => ({
     const next = { ...state.nicknamesByUasId };
     if (nickname && nickname.trim()) next[uasId] = nickname;
     else delete next[uasId];
-    // Mirror onto the matching backend drone row so any consumer reading
-    // `drone.nickname` directly sees the new value without an extra subscribe.
-    const existing = state.backendDrones[uasId];
-    const backendDrones = existing
-      ? { ...state.backendDrones, [uasId]: { ...existing, nickname: nickname || null } }
-      : state.backendDrones;
-    return { nicknamesByUasId: next, backendDrones };
+    // Mirror onto every matching backend drone row. Nicknames are per-
+    // (org, uas_id) on the backend (see drone_nicknames table) — i.e.
+    // identity-scoped, not deployment-scoped — so a single uas_id sighted
+    // in two deployments should reflect the same nickname in both. Fan
+    // out across all keys whose parsed uas_id matches.
+    const nextBackend: Record<string, any> = { ...state.backendDrones };
+    let mutated = false;
+    for (const k of Object.keys(nextBackend)) {
+      const parsed = parseBackendDroneKey(k);
+      if (parsed.uasId !== uasId) continue;
+      nextBackend[k] = { ...nextBackend[k], nickname: nickname || null };
+      mutated = true;
+    }
+    return {
+      nicknamesByUasId: next,
+      backendDrones: mutated ? nextBackend : state.backendDrones,
+    };
   }),
 
   updateBleDrone: (uasId, data) => {
@@ -157,15 +193,28 @@ export const useDroneStore = create<DroneStore>((set) => ({
 
   setBackendDrones: (drones) => {
     const coerced: Record<string, any> = {};
-    for (const k of Object.keys(drones)) coerced[k] = coerceBackendNumerics(drones[k]);
+    for (const d of drones) {
+      if (!d || typeof d.deployment_id !== 'string' || typeof d.uas_id !== 'string') continue;
+      coerced[makeBackendDroneKey(d.deployment_id, d.uas_id)] = coerceBackendNumerics(d);
+    }
     set({ backendDrones: coerced });
   },
 
   updateBackendDrone: (drone) => {
     const coerced = coerceBackendNumerics(drone);
     set(state => {
+      const deploymentId = coerced.deployment_id;
       const uasId = coerced.uas_id;
-      const existing = state.backendDrones[uasId] ?? {};
+      // Defensive: a malformed payload missing either id is unindexable
+      // under the compound-key scheme. Drop quietly — never going to
+      // happen for backend-sourced rows (both columns are NOT NULL), but
+      // a regression in the WS payload shape would silently corrupt
+      // state under uas_id-only keying.
+      if (typeof deploymentId !== 'string' || typeof uasId !== 'string') {
+        return state;
+      }
+      const key = makeBackendDroneKey(deploymentId, uasId);
+      const existing = state.backendDrones[key] ?? {};
       const existingPath = existing.path ?? [];
       const hasCoords =
         typeof coerced.last_lat === 'number' && typeof coerced.last_lon === 'number';
@@ -183,7 +232,7 @@ export const useDroneStore = create<DroneStore>((set) => ({
       return {
         backendDrones: {
           ...state.backendDrones,
-          [uasId]: { ...existing, ...coerced, path: nextPath },
+          [key]: { ...existing, ...coerced, path: nextPath },
         },
       };
     });
@@ -194,12 +243,15 @@ export const useDroneStore = create<DroneStore>((set) => ({
       const next: Record<string, any> = {};
       let changed = false;
       for (const k of Object.keys(state.backendDrones)) {
-        const d = state.backendDrones[k];
-        if (d && d.deployment_id === deploymentId) {
+        // Parse the key (authoritative) rather than reading the value's
+        // deployment_id field — the field is right today, but cheaper to
+        // trust the key we just built than to double-check the payload.
+        const parsed = parseBackendDroneKey(k);
+        if (parsed.deploymentId === deploymentId) {
           changed = true;
           continue;
         }
-        next[k] = d;
+        next[k] = state.backendDrones[k];
       }
       return changed ? { backendDrones: next } : state;
     });

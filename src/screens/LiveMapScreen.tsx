@@ -8,7 +8,7 @@ import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/nativ
 import KeepScreenOnToggle from '../components/KeepScreenOnToggle';
 import { useDroneStore } from '../store/droneStore';
 import { useAuthStore } from '../store/authStore';
-import { createWebSocket, api, ReconnectingWebSocket } from '../services/api';
+import { createWebSocket, api, ReconnectingWebSocket, SubscribeMessage } from '../services/api';
 import { useTheme, getDroneColor } from '../theme';
 import { OP_STATUS_AIRBORNE } from '../services/odidParser';
 import { startBleScanning, stopBleScanning } from '../services/bleScanner';
@@ -85,9 +85,26 @@ export default function LiveMapScreen() {
       .catch(err => console.warn('[nicknames] initial fetch failed:', err));
   }, [orgId, setNicknames]);
 
+  // `activeDeployment` is the *primary* deployment for UI display only —
+  // the banner name, the node list scope, the camera target. It is null
+  // in passive mode. The authoritative set of subscribed deployments for
+  // WS-subscription + store-eviction purposes lives in
+  // `currentActiveIds` below; an org with two simultaneously active
+  // deployments still has one primary here (target-matched if a push
+  // notification deep-linked us in, otherwise the first active —
+  // backend orders deployments by created_at DESC, so this is the most
+  // recently created one).
   const [activeDeployment, setActiveDeployment] = useState<any>(null);
   const activeDeploymentRef = useRef<any>(null);
   useEffect(() => { activeDeploymentRef.current = activeDeployment; }, [activeDeployment]);
+
+  // The full set of currently subscribed deployment ids. Drives WS
+  // subscription shape, store eviction on mode change, and the
+  // isPassive determination (empty array → passive). Compared as a set,
+  // not an ordered list — order doesn't affect any caller.
+  const [currentActiveIds, setCurrentActiveIds] = useState<string[]>([]);
+  const currentActiveIdsRef = useRef<string[]>([]);
+  useEffect(() => { currentActiveIdsRef.current = currentActiveIds; }, [currentActiveIds]);
 
   // Native uploader emits DeploymentPaused on 402 and DeploymentResumed on
   // the next 2xx, so the banner reflects whatever the backend last said
@@ -134,15 +151,21 @@ export default function LiveMapScreen() {
   const [showPausedBanner, setShowPausedBanner] = useState(false);
   // Passive mode: when no deployment is active, render recent (last 5 min)
   // detections + all org nodes so a push notification has a visual landing
-  // pad. Stored in local state (not the droneStore) to avoid racing with
-  // the global 60s eviction sweep — refetched wholesale every PASSIVE_POLL_MS.
-  const [passiveDrones, setPassiveDrones] = useState<any[]>([]);
+  // pad. Drones from passive polling now flow into the shared
+  // backendDrones store (via updateBackendDrone), same as WS-delivered
+  // detections under SUBSCRIBE_ORG. The 5-minute render-time filter
+  // (in `droneList` below) preserves the original passive-mode UX
+  // without needing a separate local state. Nodes stay in component-
+  // local state because passive mode pulls all-of-org nodes, distinct
+  // from active mode's per-deployment list.
   const [passiveNodes, setPassiveNodes] = useState<any[]>([]);
   const passivePollTimer = useRef<any>(null);
   const PASSIVE_RECENCY_MIN = 5;
   const PASSIVE_POLL_MS = 30_000;
 
-  const isPassive = !activeDeployment;
+  // Authoritative passive/active mode check. Derived from the set —
+  // activeDeployment (singular) is just a UI primary.
+  const isPassive = currentActiveIds.length === 0;
   const wsRef = useRef<ReconnectingWebSocket | null>(null);
   // Three forward-decl refs break a render-order cycle: the new
   // refresh/mode helpers (enterActiveMode, enterPassiveMode,
@@ -154,7 +177,7 @@ export default function LiveMapScreen() {
   // synchronously during render (see the assignment block just before
   // the return JSX), so by the time any effect or callback fires the
   // refs are non-null.
-  const connectWebSocketRef = useRef<((deploymentId: string) => void) | null>(null);
+  const connectWebSocketRef = useRef<((subscribe: SubscribeMessage) => void) | null>(null);
   const startPassivePollingRef = useRef<(() => void) | null>(null);
   const refreshRef = useRef<((opts?: {
     detections?: boolean;
@@ -165,9 +188,26 @@ export default function LiveMapScreen() {
   const timeouts = useRef<Record<string, any>>({});
 
   const droneList = isPassive
-    ? passiveDrones.filter(d => d.last_seen && (Date.now() - new Date(d.last_seen).getTime()) < PASSIVE_RECENCY_MIN * 60_000)
+    ? Object.values(backendDrones).filter((d: any) =>
+        d.last_seen && (Date.now() - new Date(d.last_seen).getTime()) < PASSIVE_RECENCY_MIN * 60_000)
     : Object.values(backendDrones);
   const nodesToRender = isPassive ? passiveNodes : nodes;
+
+  // Header "DRONES" count dedupes by uas_id. In multi-active mode, the
+  // same drone (uas_id) can legitimately appear in two deployments
+  // simultaneously, producing two compound-key entries in backendDrones
+  // — those should render as two markers on the map (one per node) but
+  // count as one drone identity in the header. droneList.length would
+  // double-count.
+  const uniqueDroneIdentityCount = (() => {
+    if (isPassive) return droneList.length; // passive list already at uas_id grain server-side
+    const ids = new Set<string>();
+    for (const d of droneList as any[]) {
+      const id = d?.uasId || d?.uas_id || d?.mac;
+      if (id) ids.add(id);
+    }
+    return ids.size;
+  })();
   const selectedId = selectedDrone
     ? (selectedDrone.uasId || selectedDrone.uas_id || selectedDrone.mac)
     : null;
@@ -326,67 +366,183 @@ export default function LiveMapScreen() {
     }
   };
 
-  // Side effect: switch the screen into active mode for the given deployment.
-  // Idempotent on same id (won't redundantly reconnect WS or thrash state).
-  // Caller is responsible for having fetched `dep` from the deployments list.
-  const enterActiveMode = useCallback(async (dep: any) => {
-    const prev = activeDeploymentRef.current;
-    const isSameDeployment = !!(prev && prev.id === dep.id);
+  // Helper used by both mode helpers below: ensures the WS is connected
+  // and either resubscribes the existing socket to a new shape (cheap,
+  // no socket teardown) or opens a fresh one with the given shape if
+  // none exists yet.
+  const setWsSubscription = useCallback((subscribe: SubscribeMessage) => {
+    if (wsRef.current) {
+      wsRef.current.resubscribe(subscribe);
+    } else {
+      connectWebSocketRef.current?.(subscribe);
+    }
+  }, []);
 
-    if (!isSameDeployment) setActiveDeployment(dep);
+  // Side effect: switch the screen into active mode for the given set of
+  // currently-active deployments. Idempotent on same-set (no resubscribe,
+  // no store thrash, no node refetch). Caller (refreshLiveMapState) has
+  // already filtered `actives` to deployments with status === 'active'.
+  //
+  //   actives.length === 1 → single active mode (typical solo Sentinel
+  //                          or single event deployment)
+  //   actives.length >= 2  → multi-active mode (two or more deployments
+  //                          running concurrently — the customer-B bug)
+  //
+  // The "primary" deployment selected here drives UI display only
+  // (banner name, node list); the WS subscribes to ALL ids in the set.
+  const enterActiveMode = useCallback(async (actives: any[]) => {
+    if (actives.length === 0) return; // caller's responsibility but defensive
+    const prevIds = currentActiveIdsRef.current;
+    const nextIds = actives.map(d => d.id);
 
-    // Drop passive-mode state — it's mutually exclusive with active mode.
+    // Set difference: which deployments are no longer in the active set?
+    // Drop their drones from the store. Important: we compare by *set*,
+    // not by ordered list, so a reorder of the same set is a no-op.
+    const prevSet = new Set(prevIds);
+    const nextSet = new Set(nextIds);
+    const removed = prevIds.filter(id => !nextSet.has(id));
+    const added = nextIds.filter(id => !prevSet.has(id));
+    const sameSet = removed.length === 0 && added.length === 0;
+
+    // Drop drones for every deployment NOT in the new active set. This
+    // covers the prev→next set difference AND any "leaked" entries that
+    // entered the store from passive-mode SUBSCRIBE_ORG WS messages
+    // (a drone fired on a deployment we aren't transitioning into). In
+    // active mode the store should contain only drones from subscribed
+    // deployments; the in-flight WS-message race during resubscribe is
+    // bounded by this sweep.
+    const allKnownDeploymentIds = new Set<string>();
+    for (const k of Object.keys(useDroneStore.getState().backendDrones)) {
+      const idx = k.indexOf(':');
+      if (idx > 0) allKnownDeploymentIds.add(k.slice(0, idx));
+    }
+    for (const id of allKnownDeploymentIds) {
+      if (!nextSet.has(id)) clearBackendDronesForDeployment(id);
+    }
+
+    // Pick the UI primary. If a push notification deep-linked us in with
+    // a target deployment id and that deployment is in the active set,
+    // primary = target; otherwise primary = first active (backend orders
+    // by created_at DESC, so this is the most recent).
+    const targetId = targetDeploymentIdRef.current;
+    const primary =
+      (targetId && actives.find(d => d.id === targetId)) || actives[0];
+
+    setActiveDeployment(primary);
+    setCurrentActiveIds(nextIds);
+
+    // Drop passive-mode poll + state. WS stays connected across active↔
+    // passive transitions; only the subscription shape changes.
     if (passivePollTimer.current) {
       clearInterval(passivePollTimer.current);
       passivePollTimer.current = null;
     }
-    setPassiveDrones([]);
     setPassiveNodes([]);
 
-    // WS is keyed on deployment id (server-side filter). Reconnect only on
-    // a real switch — same-id refreshes (banner attr changes, etc.) keep
-    // the live socket. Clear the previous deployment's drones from the
-    // store at the same time so they don't bleed into the new view.
-    if (!isSameDeployment) {
-      if (prev) clearBackendDronesForDeployment(prev.id);
-      wsRef.current?.close();
-      wsRef.current = null;
-      connectWebSocketRef.current?.(dep.id);
+    // Switch the WS subscription. On a same-set refresh this is a no-op
+    // inside resubscribe (cheap structural equality), so the WS stays
+    // connected without re-sending SUBSCRIBE.
+    setWsSubscription({ type: 'SUBSCRIBE', deployment_ids: nextIds });
+
+    if (sameSet) {
+      // Idempotent path: REST hydrate is the only reason a caller would
+      // re-trigger enterActiveMode with the same set (e.g. user pulls
+      // to refresh in the future, or focus event). Skip the work — the
+      // refresh path in refreshLiveMapState will fire getDetections
+      // again if `detections: true` was passed. Don't refetch nodes
+      // either: same primary.
+      return;
     }
 
-    try {
-      const dets = await api.getDetections(dep.id);
-      // No client-side last_seen cutoff. The backend's GET
-      // /api/detections/:deploymentId already scopes to the deployment,
-      // and backendDrones is session-scoped (cleared on mode change),
-      // so REST hydrate has no need to second-guess what's "live."
-      dets.forEach((d: any) => updateBackendDrone(d));
-    } catch (err) {
-      console.warn('[livemap] detection hydrate failed:', err);
+    // REST hydrate per added deployment. Linear loop is fine for the
+    // expected 1–3 deployments; if this grows, a bulk endpoint
+    // GET /api/detections?deployment_ids=a,b,c is the right move (out
+    // of scope for this commit).
+    for (const dep of actives) {
+      try {
+        const dets = await api.getDetections(dep.id);
+        dets.forEach((d: any) => updateBackendDrone(d));
+      } catch (err) {
+        console.warn(`[livemap] detection hydrate failed for ${dep.id}:`, err);
+      }
     }
 
-    await refetchNodes(dep);
-  }, [refetchNodes, updateBackendDrone, clearBackendDronesForDeployment]);
+    // Node list is per-deployment. Use the primary for now — nodes from
+    // non-primary active deployments won't render until a future commit
+    // generalizes the node list to multi-deployment.
+    await refetchNodes(primary);
 
-  // Side effect: switch the screen into passive mode. Disconnects any
-  // active WS, clears active-deployment state, and starts the recent-
-  // detections poll. Idempotent — startPassivePolling resets its own
-  // interval on every call.
+    // Cold-start-from-notification UX hint: if a target deployment was
+    // deep-linked and is in the active set, nudge the map toward it.
+    // Best-effort and bounded: the user can pan/zoom afterward. Trying
+    // a drone's last position first, then a node's, then giving up.
+    if (targetId && nextSet.has(targetId) && cameraRef.current) {
+      const all = Object.values(useDroneStore.getState().backendDrones) as any[];
+      const fromTarget = all
+        .filter((d: any) =>
+          d.deployment_id === targetId
+          && typeof d.last_lat === 'number'
+          && typeof d.last_lon === 'number')
+        .sort((a: any, b: any) =>
+          new Date(b.last_seen).getTime() - new Date(a.last_seen).getTime());
+      const drone = fromTarget[0];
+      if (drone) {
+        try {
+          cameraRef.current.setCamera({
+            centerCoordinate: [drone.last_lon, drone.last_lat],
+            zoomLevel: 14,
+            animationDuration: 800,
+          });
+        } catch (err) {
+          console.warn('[livemap] target camera setCamera failed:', err);
+        }
+      } else {
+        const node = nodesRef.current.find((n: any) =>
+          typeof n.last_lat === 'number' && typeof n.last_lon === 'number');
+        if (node) {
+          try {
+            cameraRef.current.setCamera({
+              centerCoordinate: [node.last_lon, node.last_lat],
+              zoomLevel: 14,
+              animationDuration: 800,
+            });
+          } catch (err) {
+            console.warn('[livemap] target camera setCamera failed:', err);
+          }
+        }
+      }
+    }
+  }, [refetchNodes, updateBackendDrone, clearBackendDronesForDeployment, setWsSubscription]);
+
+  // Side effect: switch into passive mode. WS stays connected (under a
+  // SUBSCRIBE_ORG shape) so org-wide detections still surface in real
+  // time; the 30s passive poll is retained as a backup for the windows
+  // where the WS is briefly down between reconnects.
   const enterPassiveMode = useCallback(() => {
-    // Capture the outgoing deployment id BEFORE nulling state so we can
-    // drop its drones from the store. Otherwise the previous
-    // deployment's last frame would persist on the map indefinitely
-    // (backendDrones is no longer age-swept; see droneStore.ts).
-    const prev = activeDeploymentRef.current;
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
+    const prevIds = currentActiveIdsRef.current;
+
     setActiveDeployment(null);
+    setCurrentActiveIds([]);
     setNodes([]);
-    if (prev) clearBackendDronesForDeployment(prev.id);
+
+    // Clear every previously-active deployment's drones from the store.
+    // Without this, the screen would carry the last frame of the
+    // outgoing deployments after the user moved off them.
+    for (const id of prevIds) {
+      clearBackendDronesForDeployment(id);
+    }
+
+    // Org-wide WS subscription. Connects if not already connected.
+    // resubscribe is a no-op if we were already on SUBSCRIBE_ORG.
+    setWsSubscription({ type: 'SUBSCRIBE_ORG' });
+
+    // Backup poll. Largely redundant once WS is established, but kept
+    // for the brief windows where the WS is between reconnects (Render
+    // LB drops idle connections; backoff up to 30s on the client). Both
+    // the WS and the poll feed updateBackendDrone, so a detection that
+    // arrives twice is just an idempotent re-merge of the same row.
     startPassivePollingRef.current?.();
-  }, [clearBackendDronesForDeployment]);
+  }, [clearBackendDronesForDeployment, setWsSubscription]);
 
   // The single refresh entry point used by mount, focus, foreground,
   // and WS-reconnect. Decides mode (active vs passive), drives the
@@ -411,42 +567,53 @@ export default function LiveMapScreen() {
     if (reevaluateMode) {
       try {
         const deps = await api.getDeployments();
-        const cur = activeDeploymentRef.current;
+        const actives = deps.filter((d: any) => d.status === 'active');
+        const prevIds = currentActiveIdsRef.current;
+        const nextIds = actives.map((d: any) => d.id);
+
+        const prevSet = new Set(prevIds);
+        const nextSet = new Set(nextIds);
+        const setChanged =
+          prevIds.length !== nextIds.length ||
+          nextIds.some((id: string) => !prevSet.has(id)) ||
+          prevIds.some((id: string) => !nextSet.has(id));
+
+        // Targeted-but-not-active warning (preserved from Commit 2
+        // behavior): if a notification deep-linked us with a target that
+        // is no longer active, log so we can spot it. enterActiveMode's
+        // primary selection still falls through to actives[0] in that
+        // case via the ref read.
         const targetId = targetDeploymentIdRef.current;
+        if (targetId && !nextSet.has(targetId)) {
+          console.warn(`[livemap] targetDeploymentId=${targetId} not in active set (${nextIds.length} active); using primary fallback`);
+        }
 
-        // Notification-tap deep-link: prefer the deployment the push
-        // referenced. If that deployment is no longer active (expired or
-        // ended by the time the user opened the app), fall back to
-        // .find() and warn so we can spot this in dev. Commit 4
-        // generalizes this to multi-deployment subscribe.
-        let newActive: any | undefined;
-        if (targetId) {
-          const targeted = deps.find((d: any) => d.id === targetId);
-          if (targeted && targeted.status === 'active') {
-            newActive = targeted;
-          } else {
-            console.warn(`[livemap] targetDeploymentId=${targetId} not active or not found; falling back to first active`);
-            newActive = deps.find((d: any) => d.status === 'active');
+        if (actives.length === 0) {
+          // Transition into passive mode. Fire when (a) we were
+          // previously active (real mode change, clear stores) OR
+          // (b) we haven't connected the WS yet (first cold-start
+          // with zero active deployments — without this the WS would
+          // never come up under SUBSCRIBE_ORG and org-wide detections
+          // would only surface via the 30s poll).
+          if (prevIds.length > 0 || !wsRef.current) {
+            enterPassiveMode();
+            return;
           }
-        } else {
-          newActive = deps.find((d: any) => d.status === 'active');
         }
-
-        const shouldEnterActive = newActive && (!cur || cur.id !== newActive.id);
-        const shouldEnterPassive = !newActive && cur;
-
-        if (shouldEnterActive) {
-          await enterActiveMode(newActive);
+        if (actives.length > 0 && setChanged) {
+          await enterActiveMode(actives);
           return;
         }
-        if (shouldEnterPassive) {
-          enterPassiveMode();
-          return;
-        }
-        if (newActive && cur && cur.id === newActive.id) {
-          // Same deployment; keep the stored copy fresh (name/mode
-          // could have changed) but no mode switch.
-          setActiveDeployment(newActive);
+        if (actives.length > 0 && !setChanged) {
+          // Same active set, no mode switch needed. Refresh the UI
+          // primary's stored copy in case name/mode changed server-side.
+          const cur = activeDeploymentRef.current;
+          const primary = (targetId && actives.find((d: any) => d.id === targetId))
+            || actives.find((d: any) => cur && d.id === cur.id)
+            || actives[0];
+          if (!cur || cur.id !== primary.id || cur.name !== primary.name) {
+            setActiveDeployment(primary);
+          }
         }
         // else: was passive, still passive — fall through to refresh.
       } catch (err) {
@@ -455,24 +622,32 @@ export default function LiveMapScreen() {
       }
     }
 
-    const cur = activeDeploymentRef.current;
-    if (cur) {
+    const curIds = currentActiveIdsRef.current;
+    if (curIds.length > 0) {
       if (detections) {
-        try {
-          const dets = await api.getDetections(cur.id);
-          // No client-side last_seen cutoff (see enterActiveMode comment).
-          dets.forEach((d: any) => updateBackendDrone(d));
-        } catch (err) {
-          console.warn('[livemap] detection refetch failed:', err);
+        // Refresh detections for every subscribed deployment. Loop is
+        // fine for typical counts; a bulk endpoint is the next move
+        // if multi-deployment customers grow.
+        for (const id of curIds) {
+          try {
+            const dets = await api.getDetections(id);
+            dets.forEach((d: any) => updateBackendDrone(d));
+          } catch (err) {
+            console.warn(`[livemap] detection refetch failed for ${id}:`, err);
+          }
         }
       }
       if (nodes) {
-        await refetchNodes(cur);
+        // Node list is scoped to the UI primary (see enterActiveMode
+        // note); refetch only that.
+        const primary = activeDeploymentRef.current;
+        if (primary) await refetchNodes(primary);
       }
     } else if (detections || nodes) {
-      // Passive mode: the 30s poll is wholesale (drones + nodes
-      // together). Re-arming it fires poll() immediately, which is
-      // what callers expect for an eager refresh.
+      // Passive mode: re-arm the poll. WS is also live under
+      // SUBSCRIBE_ORG so most of this is redundant, but the poll
+      // guarantees an immediate refresh without waiting on WS message
+      // arrival.
       startPassivePollingRef.current?.();
     }
   }, [enterActiveMode, enterPassiveMode, updateBackendDrone, refetchNodes]);
@@ -496,7 +671,15 @@ export default function LiveMapScreen() {
           api.getRecentDetections(PASSIVE_RECENCY_MIN),
           api.getNodes(),
         ]);
-        setPassiveDrones(Array.isArray(dets) ? dets : []);
+        // Drones merge into the shared backendDrones store via
+        // updateBackendDrone — same path as WS-delivered detections.
+        // The 5-min render filter in `droneList` enforces the passive-
+        // mode visibility window; aged-out entries linger in the store
+        // until the next mode change (consistent with session-scoped
+        // eviction from Commit 3).
+        if (Array.isArray(dets)) {
+          for (const d of dets) updateBackendDrone(d);
+        }
         setPassiveNodes(Array.isArray(nodeList) ? nodeList : []);
       } catch (err) {
         console.warn('[passive] poll failed:', err);
@@ -505,10 +688,10 @@ export default function LiveMapScreen() {
     void poll();
     if (passivePollTimer.current) clearInterval(passivePollTimer.current);
     passivePollTimer.current = setInterval(poll, PASSIVE_POLL_MS);
-  }, []);
+  }, [updateBackendDrone]);
 
-  const connectWebSocket = useCallback((deploymentId: string) => {
-    const ws = createWebSocket(deploymentId, (msg) => {
+  const connectWebSocket = useCallback((subscribe: SubscribeMessage) => {
+    const ws = createWebSocket(subscribe, (msg) => {
       if (msg.type === 'DRONE_UPDATE') {
         msg.drones.forEach((d: any) => updateBackendDrone(d));
       }
@@ -751,7 +934,7 @@ export default function LiveMapScreen() {
         <KeepScreenOnToggle keepAwakeTag="live-map" />
         <View style={s.statsRow}>
           <View style={s.stat}>
-            <Text style={s.statVal}>{droneList.length}</Text>
+            <Text style={s.statVal}>{uniqueDroneIdentityCount}</Text>
             <Text style={s.statLabel}>DRONES</Text>
           </View>
           <View style={s.stat}>

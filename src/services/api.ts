@@ -201,9 +201,23 @@ export const api = {
 
 export type WsStatus = 'connecting' | 'connected' | 'reconnecting' | 'closed';
 
+// Wire format for the two subscription shapes the backend SUBSCRIBE/
+// SUBSCRIBE_ORG handlers accept (see server.js). Active-mode Live Map
+// uses SUBSCRIBE with a deployment_ids array; passive-mode Live Map
+// uses SUBSCRIBE_ORG to receive every detection across the user's
+// accessible orgs. Replacing one with the other on the live socket is
+// done via ReconnectingWebSocket.resubscribe — no need to tear down.
+export type SubscribeMessage =
+  | { type: 'SUBSCRIBE'; deployment_ids: string[] }
+  | { type: 'SUBSCRIBE_ORG' };
+
 export interface ReconnectingWebSocket {
   close(): void;
   status(): WsStatus;
+  // Update the subscription on the open socket if any, AND remember the
+  // new shape so future reconnects re-send it instead of the original.
+  // No-op if the new shape is deeply equal to the current one.
+  resubscribe(subscribe: SubscribeMessage): void;
 }
 
 interface CreateWebSocketOptions {
@@ -223,8 +237,22 @@ function nextBackoff(attempt: number): number {
   return Math.max(250, Math.round(base + jitter));
 }
 
+// Cheap structural equality for SubscribeMessage. Used to short-circuit
+// no-op resubscribes (e.g. AppState→active → reevaluateMode produces the
+// same actives set as before).
+function subscribesEqual(a: SubscribeMessage, b: SubscribeMessage): boolean {
+  if (a.type !== b.type) return false;
+  if (a.type === 'SUBSCRIBE_ORG') return true;
+  const ai = (a as { deployment_ids: string[] }).deployment_ids;
+  const bi = (b as { deployment_ids: string[] }).deployment_ids;
+  if (ai.length !== bi.length) return false;
+  const setA = new Set(ai);
+  for (const x of bi) if (!setA.has(x)) return false;
+  return true;
+}
+
 export function createWebSocket(
-  deploymentId: string,
+  subscribe: SubscribeMessage,
   onMessage: (msg: any) => void,
   opts: CreateWebSocketOptions = {},
 ): ReconnectingWebSocket {
@@ -236,6 +264,9 @@ export function createWebSocket(
   let attempt = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  // Mutable so resubscribe() can swap the shape sent on each (re)connect
+  // without tearing down the socket.
+  let currentSubscribe: SubscribeMessage = subscribe;
 
   const clearReconnect = () => {
     if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -269,7 +300,7 @@ export function createWebSocket(
       hasEverConnected = true;
       hadUnexpectedClose = false;
 
-      socket.send(JSON.stringify({ type: 'SUBSCRIBE', deployment_id: deploymentId }));
+      socket.send(JSON.stringify(currentSubscribe));
 
       clearKeepalive();
       keepaliveTimer = setInterval(() => {
@@ -338,5 +369,15 @@ export function createWebSocket(
       ws = null;
     },
     status: () => statusVal,
+    resubscribe(next: SubscribeMessage) {
+      if (subscribesEqual(currentSubscribe, next)) return;
+      currentSubscribe = next;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify(next)); } catch (err) {
+          console.warn('[ws] resubscribe send failed:', err);
+        }
+      }
+      // If not open, the next connect()'s onopen will send `currentSubscribe`.
+    },
   };
 }
