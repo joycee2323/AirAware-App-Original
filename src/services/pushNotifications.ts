@@ -298,7 +298,17 @@ export function deepLinkForNotification(navigation: any, data: any): void {
   try {
     switch (screen) {
       case 'LiveMap':
-        navigation.navigate('Main', { screen: 'LiveMap' });
+        // Forward deployment_id as `targetDeploymentId` so LiveMap can
+        // bias its active/passive mode decision toward the deployment
+        // the push referenced — necessary when the user has multiple
+        // active deployments and the .find() default would pick the
+        // wrong one. Backend always includes deployment_id in
+        // drone_detected push data (see routes/detections.js and
+        // routes/nodes.js sendNotificationToOrg sites).
+        navigation.navigate('Main', {
+          screen: 'LiveMap',
+          params: deploymentId ? { targetDeploymentId: deploymentId } : undefined,
+        });
         break;
       case 'DeploymentDetail':
         navigation.navigate('Main', { screen: 'Deployments', params: { deployment_id: deploymentId } });

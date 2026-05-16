@@ -4,7 +4,7 @@ import {
 } from 'react-native';
 import MapboxGL from '@rnmapbox/maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
 import KeepScreenOnToggle from '../components/KeepScreenOnToggle';
 import { useDroneStore } from '../store/droneStore';
 import { useAuthStore } from '../store/authStore';
@@ -30,6 +30,21 @@ export default function LiveMapScreen() {
   const colors = useTheme();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<any>();
+  const route = useRoute();
+
+  // Mirrors the most recent push-notification deep-link hint. The push
+  // payload's `data.deployment_id` is forwarded through navigation params
+  // by deepLinkForNotification (services/pushNotifications.ts), and we
+  // read it from the route here. Stored in a ref so the deployment-
+  // selection logic inside refreshLiveMapState can pick up the latest
+  // value without re-creating its useCallback closure every nav.
+  const targetDeploymentIdRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const t = (route.params as any)?.targetDeploymentId;
+    if (typeof t === 'string' && t.length > 0) {
+      targetDeploymentIdRef.current = t;
+    }
+  }, [route.params]);
 
   // Subscribe to render-relevant state with individual selectors so that
   // high-frequency BLE updates to nearbyNodes don't re-render the whole screen.
@@ -128,6 +143,23 @@ export default function LiveMapScreen() {
 
   const isPassive = !activeDeployment;
   const wsRef = useRef<ReconnectingWebSocket | null>(null);
+  // Three forward-decl refs break a render-order cycle: the new
+  // refresh/mode helpers (enterActiveMode, enterPassiveMode,
+  // refreshLiveMapState) want to call connectWebSocket and
+  // startPassivePolling, but those are declared further down in the
+  // function body and would TDZ-error if referenced in a useCallback
+  // deps array. Conversely, connectWebSocket's onReconnect needs to
+  // dispatch into refreshLiveMapState. All three refs are populated
+  // synchronously during render (see the assignment block just before
+  // the return JSX), so by the time any effect or callback fires the
+  // refs are non-null.
+  const connectWebSocketRef = useRef<((deploymentId: string) => void) | null>(null);
+  const startPassivePollingRef = useRef<(() => void) | null>(null);
+  const refreshRef = useRef<((opts?: {
+    detections?: boolean;
+    nodes?: boolean;
+    reevaluateMode?: boolean;
+  }) => Promise<void>) | null>(null);
   const cameraRef = useRef<MapboxGL.Camera>(null);
   const timeouts = useRef<Record<string, any>>({});
 
@@ -224,27 +256,35 @@ export default function LiveMapScreen() {
     };
   }, []);
 
-  // Refetch nodes when this screen regains focus (e.g. after the user visits
-  // the Nodes tab and returns, where assignments may have changed).
+  // Re-evaluate mode + refetch detections/nodes when this screen regains
+  // focus (e.g. after a tab switch). Previously only refetched nodes — a
+  // detection that arrived while another tab was active wouldn't surface
+  // until a WS push or full remount. Routed through refreshRef so the
+  // helper's identity churn (orgId changes, etc.) doesn't reset focus
+  // listener wiring on every render.
   useFocusEffect(
     useCallback(() => {
-      void refetchNodes();
+      void refreshRef.current?.({ detections: true, nodes: true, reevaluateMode: true });
       void checkUserNodes();
-    }, [refetchNodes, checkUserNodes])
+    }, [checkUserNodes])
   );
 
-  // Refetch nodes when the app returns from background to foreground — the
-  // WS connection may have dropped heartbeats while suspended.
+  // Re-evaluate mode + refetch when the app returns from background to
+  // foreground. Customer A's bug: a detection arrived while the app was
+  // backgrounded, but the prior implementation only re-fetched nodes on
+  // resume, leaving the drone invisible on Live Map until a force-close.
+  // reevaluateMode also catches the "scheduled deployment activated
+  // while I was away" case from the report addendum.
   useEffect(() => {
     let prevState = AppState.currentState;
     const sub = AppState.addEventListener('change', (state) => {
       if (prevState !== 'active' && state === 'active') {
-        void refetchNodes();
+        void refreshRef.current?.({ detections: true, nodes: true, reevaluateMode: true });
       }
       prevState = state;
     });
     return () => sub.remove();
-  }, [refetchNodes]);
+  }, []);
 
   // Operator typed into the nickname TextInput. Optimistically update the
   // local store, then debounce a server PATCH. The server's WS broadcast
@@ -285,33 +325,155 @@ export default function LiveMapScreen() {
     }
   };
 
-  const loadActiveDeployment = async () => {
-    try {
-      const deps = await api.getDeployments();
-      const active = deps.find((d: any) => d.status === 'active');
-      if (active) {
-        setActiveDeployment(active);
-        connectWebSocket(active.id);
-        const dets = await api.getDetections(active.id);
-        // Filter to the last 60s so stale detections from earlier in the
-        // deployment don't hydrate as live markers. Matches the dashboard
-        // hydrate path (commit 9e0cf92).
-        const cutoff = Date.now() - 60_000;
-        dets
-          .filter((d: any) => d.last_seen && new Date(d.last_seen).getTime() > cutoff)
-          .forEach((d: any) => updateBackendDrone(d));
-        await refetchNodes(active);
-      } else {
-        // Passive view — no managed deployment, but the org may have a
-        // continuous Sentinel deployment running elsewhere. Show its
-        // recent detections + all org nodes so push notifications have
-        // somewhere to point.
-        startPassivePolling();
-      }
-    } catch (err) {
-      console.warn('Failed to load deployment:', err);
+  // Side effect: switch the screen into active mode for the given deployment.
+  // Idempotent on same id (won't redundantly reconnect WS or thrash state).
+  // Caller is responsible for having fetched `dep` from the deployments list.
+  const enterActiveMode = useCallback(async (dep: any) => {
+    const prev = activeDeploymentRef.current;
+    const isSameDeployment = !!(prev && prev.id === dep.id);
+
+    if (!isSameDeployment) setActiveDeployment(dep);
+
+    // Drop passive-mode state — it's mutually exclusive with active mode.
+    if (passivePollTimer.current) {
+      clearInterval(passivePollTimer.current);
+      passivePollTimer.current = null;
     }
-  };
+    setPassiveDrones([]);
+    setPassiveNodes([]);
+
+    // WS is keyed on deployment id (server-side filter). Reconnect only on
+    // a real switch — same-id refreshes (banner attr changes, etc.) keep
+    // the live socket.
+    if (!isSameDeployment) {
+      wsRef.current?.close();
+      wsRef.current = null;
+      connectWebSocketRef.current?.(dep.id);
+    }
+
+    try {
+      const dets = await api.getDetections(dep.id);
+      // 60s last_seen cutoff matches the dashboard hydrate path
+      // (commit 9e0cf92); Commit 3 will revisit this.
+      const cutoff = Date.now() - 60_000;
+      dets
+        .filter((d: any) => d.last_seen && new Date(d.last_seen).getTime() > cutoff)
+        .forEach((d: any) => updateBackendDrone(d));
+    } catch (err) {
+      console.warn('[livemap] detection hydrate failed:', err);
+    }
+
+    await refetchNodes(dep);
+  }, [refetchNodes, updateBackendDrone]);
+
+  // Side effect: switch the screen into passive mode. Disconnects any
+  // active WS, clears active-deployment state, and starts the recent-
+  // detections poll. Idempotent — startPassivePolling resets its own
+  // interval on every call.
+  const enterPassiveMode = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setActiveDeployment(null);
+    setNodes([]);
+    startPassivePollingRef.current?.();
+  }, []);
+
+  // The single refresh entry point used by mount, focus, foreground,
+  // and WS-reconnect. Decides mode (active vs passive), drives the
+  // mode-change side effects, and refetches what was requested.
+  //
+  // reevaluateMode: re-runs the active/passive decision against a fresh
+  //   deployments fetch. Needed when the user backgrounds the app while
+  //   a deployment is `scheduled` and foregrounds it after the activation
+  //   cron fires — without this, the "NO ACTIVE DEPLOYMENT" banner sticks
+  //   until the next remount.
+  //
+  // When reevaluateMode triggers a mode switch, enterActiveMode /
+  // enterPassiveMode already hydrate everything; the `detections`/`nodes`
+  // flags are only consulted on the no-mode-change path.
+  const refreshLiveMapState = useCallback(async (opts: {
+    detections?: boolean;
+    nodes?: boolean;
+    reevaluateMode?: boolean;
+  } = {}) => {
+    const { detections = false, nodes = false, reevaluateMode = false } = opts;
+
+    if (reevaluateMode) {
+      try {
+        const deps = await api.getDeployments();
+        const cur = activeDeploymentRef.current;
+        const targetId = targetDeploymentIdRef.current;
+
+        // Notification-tap deep-link: prefer the deployment the push
+        // referenced. If that deployment is no longer active (expired or
+        // ended by the time the user opened the app), fall back to
+        // .find() and warn so we can spot this in dev. Commit 4
+        // generalizes this to multi-deployment subscribe.
+        let newActive: any | undefined;
+        if (targetId) {
+          const targeted = deps.find((d: any) => d.id === targetId);
+          if (targeted && targeted.status === 'active') {
+            newActive = targeted;
+          } else {
+            console.warn(`[livemap] targetDeploymentId=${targetId} not active or not found; falling back to first active`);
+            newActive = deps.find((d: any) => d.status === 'active');
+          }
+        } else {
+          newActive = deps.find((d: any) => d.status === 'active');
+        }
+
+        const shouldEnterActive = newActive && (!cur || cur.id !== newActive.id);
+        const shouldEnterPassive = !newActive && cur;
+
+        if (shouldEnterActive) {
+          await enterActiveMode(newActive);
+          return;
+        }
+        if (shouldEnterPassive) {
+          enterPassiveMode();
+          return;
+        }
+        if (newActive && cur && cur.id === newActive.id) {
+          // Same deployment; keep the stored copy fresh (name/mode
+          // could have changed) but no mode switch.
+          setActiveDeployment(newActive);
+        }
+        // else: was passive, still passive — fall through to refresh.
+      } catch (err) {
+        console.warn('[livemap] deployments refetch failed:', err);
+        // Fall through using current mode.
+      }
+    }
+
+    const cur = activeDeploymentRef.current;
+    if (cur) {
+      if (detections) {
+        try {
+          const dets = await api.getDetections(cur.id);
+          const cutoff = Date.now() - 60_000;
+          dets
+            .filter((d: any) => d.last_seen && new Date(d.last_seen).getTime() > cutoff)
+            .forEach((d: any) => updateBackendDrone(d));
+        } catch (err) {
+          console.warn('[livemap] detection refetch failed:', err);
+        }
+      }
+      if (nodes) {
+        await refetchNodes(cur);
+      }
+    } else if (detections || nodes) {
+      // Passive mode: the 30s poll is wholesale (drones + nodes
+      // together). Re-arming it fires poll() immediately, which is
+      // what callers expect for an eager refresh.
+      startPassivePollingRef.current?.();
+    }
+  }, [enterActiveMode, enterPassiveMode, updateBackendDrone, refetchNodes]);
+
+  const loadActiveDeployment = useCallback(async () => {
+    await refreshLiveMapState({ detections: true, nodes: true, reevaluateMode: true });
+  }, [refreshLiveMapState]);
 
   // Polls recent org-wide detections + all org nodes every PASSIVE_POLL_MS.
   // Gated on userHasAnyNode === true at call time — checkUserNodes resolves
@@ -371,29 +533,24 @@ export default function LiveMapScreen() {
     }, {
       // After an unexpected close + reconnect, the WS resumes live updates
       // but the client's in-memory state is stale for whatever window the
-      // connection was down. Refetch detections + nodes for the active
-      // deployment to close the gap. Guarded on activeDeploymentRef to
-      // avoid racing with deployment teardown.
+      // connection was down. Routed through refreshRef so a deployment
+      // that activated or ended while the WS was down also triggers the
+      // active/passive mode switch (not just a detections/nodes refetch).
       onReconnect: () => {
-        const active = activeDeploymentRef.current;
-        if (!active) return;
-        console.info('[ws] reconnect — refetching detections + nodes for', active.id);
-        (async () => {
-          try {
-            const dets = await api.getDetections(active.id);
-            const cutoff = Date.now() - 60_000;
-            dets
-              .filter((d: any) => d.last_seen && new Date(d.last_seen).getTime() > cutoff)
-              .forEach((d: any) => updateBackendDrone(d));
-          } catch (err) {
-            console.warn('[ws] reconnect detection refetch failed:', err);
-          }
-          void refetchNodes(active);
-        })();
+        console.info('[ws] reconnect — re-evaluating mode + refetching state');
+        void refreshRef.current?.({ detections: true, nodes: true, reevaluateMode: true });
       },
     });
     wsRef.current = ws;
-  }, [scheduleRefetchNodes, updateBackendDrone, refetchNodes, orgId, updateNickname]);
+  }, [scheduleRefetchNodes, updateBackendDrone, orgId, updateNickname]);
+
+  // Forward-decl ref sync. Runs during render, after all useCallback
+  // consts above are bound, so by the time any effect/timer/event
+  // handler fires the refs are non-null. Cheap on every render — just
+  // three mutable-ref writes.
+  connectWebSocketRef.current = connectWebSocket;
+  startPassivePollingRef.current = startPassivePolling;
+  refreshRef.current = refreshLiveMapState;
 
   const s = styles(colors);
 
