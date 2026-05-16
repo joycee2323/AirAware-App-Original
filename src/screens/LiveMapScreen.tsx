@@ -218,19 +218,33 @@ export default function LiveMapScreen() {
   // per-node timers, last-seen state, or 404/skip tracking — see
   // android/app/src/main/java/com/westshoredrone/watch/NodeHeartbeatUploader.kt.
 
-  // Refetch the node list for the active deployment. Used by the initial load,
-  // focus/foreground resume, and unknown-node WS messages. Accepts an optional
-  // deployment arg for the first call (before setActiveDeployment has flushed
-  // into the ref).
-  const refetchNodes = useCallback(async (dep?: any) => {
-    const active = dep ?? activeDeploymentRef.current;
-    if (!active) return;
-    try {
-      const nodeList = await api.getNodes(active.id);
-      setNodes(nodeList);
-    } catch (err) {
-      console.warn('[nodeRefetch] failed:', err);
-    }
+  // Refetch the node list for every currently-active deployment. Used by the
+  // initial load, focus/foreground resume, and unknown-node WS messages.
+  // Accepts an optional id list for the first call from enterActiveMode
+  // (before currentActiveIdsRef has flushed); otherwise reads the ref.
+  //
+  // Partial-success semantics: one deployment's fetch failing (transient
+  // 5xx, partner grant revoked mid-session) must not blank out other
+  // deployments' nodes from the map. allSettled + filter-fulfilled gives
+  // us that; rejected branches log so a persistent failure stays visible
+  // during development. The detections-hydrate loop in enterActiveMode
+  // has the same partial-failure exposure but is scoped to a separate
+  // followup.
+  const refetchNodes = useCallback(async (ids?: string[]) => {
+    const targetIds = ids ?? currentActiveIdsRef.current;
+    if (targetIds.length === 0) return;
+    const results = await Promise.allSettled(
+      targetIds.map(id => api.getNodes(id))
+    );
+    const merged: any[] = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled' && Array.isArray(r.value)) {
+        merged.push(...r.value);
+      } else if (r.status === 'rejected') {
+        console.warn(`[nodeRefetch] failed for ${targetIds[i]}:`, r.reason);
+      }
+    });
+    setNodes(merged);
   }, []);
 
   // Debounced wrapper for WS-triggered refetches — a burst of NODE_ONLINE
@@ -467,10 +481,11 @@ export default function LiveMapScreen() {
       }
     }
 
-    // Node list is per-deployment. Use the primary for now — nodes from
-    // non-primary active deployments won't render until a future commit
-    // generalizes the node list to multi-deployment.
-    await refetchNodes(primary);
+    // Hydrate nodes for every active deployment, not just the primary.
+    // Pass nextIds explicitly because currentActiveIdsRef.current isn't
+    // guaranteed to be flushed yet — setCurrentActiveIds(nextIds) was
+    // queued above but the ref-sync useEffect hasn't run.
+    await refetchNodes(nextIds);
 
     // Cold-start-from-notification UX hint: if a target deployment was
     // deep-linked and is in the active set, nudge the map toward it.
@@ -638,10 +653,10 @@ export default function LiveMapScreen() {
         }
       }
       if (nodes) {
-        // Node list is scoped to the UI primary (see enterActiveMode
-        // note); refetch only that.
-        const primary = activeDeploymentRef.current;
-        if (primary) await refetchNodes(primary);
+        // Refetch nodes for every currently-active deployment. ref is
+        // current at this point (no in-flight setCurrentActiveIds from
+        // this code path), so the arg-less call is correct.
+        await refetchNodes();
       }
     } else if (detections || nodes) {
       // Passive mode: re-arm the poll. WS is also live under
@@ -701,9 +716,18 @@ export default function LiveMapScreen() {
         updateNickname(msg.uas_id, msg.nickname || null);
       }
       if (msg.type === 'NODE_OFFLINE') {
-        setNodes(prev => prev.map((n: any) =>
-          n.id === msg.node_id ? { ...n, status: 'offline' } : n
-        ));
+        const existing = nodesRef.current.find((n: any) => n.id === msg.node_id);
+        if (existing) {
+          setNodes(prev => prev.map((n: any) =>
+            n.id === msg.node_id ? { ...n, status: 'offline' } : n
+          ));
+        } else {
+          // Unknown node — partner grant just expanded, or a node was
+          // added to one of our active deployments while we were on a
+          // stale snapshot. Symmetric with the NODE_ONLINE fallback
+          // below; refetch is debounced.
+          scheduleRefetchNodes();
+        }
       }
       if (msg.type === 'NODE_ONLINE') {
         const existing = nodesRef.current.find((n: any) => n.id === msg.node_id);
