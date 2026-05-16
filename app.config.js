@@ -27,7 +27,10 @@ module.exports = ({ config }) => ({
         foregroundImage: './assets/adaptive-icon.png',
         backgroundColor: '#0a0e1a',
       },
-      package: 'com.westshoredrone.watch',
+      // `package` intentionally omitted — the native android/ directory
+      // exists, so EAS reads applicationId from android/app/build.gradle
+      // (com.westshoredrone.watch). Keeping it here too just produced an
+      // EAS warning about the dupe being ignored.
       versionCode: 1,
       // FCM credentials for push delivery on standalone builds. EAS
       // Build resolves GOOGLE_SERVICES_JSON (set as an EAS secret with
