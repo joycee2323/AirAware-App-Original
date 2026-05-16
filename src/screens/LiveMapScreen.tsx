@@ -59,6 +59,7 @@ export default function LiveMapScreen() {
   const updateNearbyNode = useDroneStore(s => s.updateNearbyNode);
   const setNicknames = useDroneStore(s => s.setNicknames);
   const updateNickname = useDroneStore(s => s.updateNickname);
+  const clearBackendDronesForDeployment = useDroneStore(s => s.clearBackendDronesForDeployment);
 
   // Per-uasId debounce timers keyed so editing several drones in succession
   // doesn't cancel earlier saves. Cleared on screen unmount.
@@ -344,8 +345,10 @@ export default function LiveMapScreen() {
 
     // WS is keyed on deployment id (server-side filter). Reconnect only on
     // a real switch — same-id refreshes (banner attr changes, etc.) keep
-    // the live socket.
+    // the live socket. Clear the previous deployment's drones from the
+    // store at the same time so they don't bleed into the new view.
     if (!isSameDeployment) {
+      if (prev) clearBackendDronesForDeployment(prev.id);
       wsRef.current?.close();
       wsRef.current = null;
       connectWebSocketRef.current?.(dep.id);
@@ -353,32 +356,37 @@ export default function LiveMapScreen() {
 
     try {
       const dets = await api.getDetections(dep.id);
-      // 60s last_seen cutoff matches the dashboard hydrate path
-      // (commit 9e0cf92); Commit 3 will revisit this.
-      const cutoff = Date.now() - 60_000;
-      dets
-        .filter((d: any) => d.last_seen && new Date(d.last_seen).getTime() > cutoff)
-        .forEach((d: any) => updateBackendDrone(d));
+      // No client-side last_seen cutoff. The backend's GET
+      // /api/detections/:deploymentId already scopes to the deployment,
+      // and backendDrones is session-scoped (cleared on mode change),
+      // so REST hydrate has no need to second-guess what's "live."
+      dets.forEach((d: any) => updateBackendDrone(d));
     } catch (err) {
       console.warn('[livemap] detection hydrate failed:', err);
     }
 
     await refetchNodes(dep);
-  }, [refetchNodes, updateBackendDrone]);
+  }, [refetchNodes, updateBackendDrone, clearBackendDronesForDeployment]);
 
   // Side effect: switch the screen into passive mode. Disconnects any
   // active WS, clears active-deployment state, and starts the recent-
   // detections poll. Idempotent — startPassivePolling resets its own
   // interval on every call.
   const enterPassiveMode = useCallback(() => {
+    // Capture the outgoing deployment id BEFORE nulling state so we can
+    // drop its drones from the store. Otherwise the previous
+    // deployment's last frame would persist on the map indefinitely
+    // (backendDrones is no longer age-swept; see droneStore.ts).
+    const prev = activeDeploymentRef.current;
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
     setActiveDeployment(null);
     setNodes([]);
+    if (prev) clearBackendDronesForDeployment(prev.id);
     startPassivePollingRef.current?.();
-  }, []);
+  }, [clearBackendDronesForDeployment]);
 
   // The single refresh entry point used by mount, focus, foreground,
   // and WS-reconnect. Decides mode (active vs passive), drives the
@@ -452,10 +460,8 @@ export default function LiveMapScreen() {
       if (detections) {
         try {
           const dets = await api.getDetections(cur.id);
-          const cutoff = Date.now() - 60_000;
-          dets
-            .filter((d: any) => d.last_seen && new Date(d.last_seen).getTime() > cutoff)
-            .forEach((d: any) => updateBackendDrone(d));
+          // No client-side last_seen cutoff (see enterActiveMode comment).
+          dets.forEach((d: any) => updateBackendDrone(d));
         } catch (err) {
           console.warn('[livemap] detection refetch failed:', err);
         }

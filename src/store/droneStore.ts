@@ -28,7 +28,17 @@ export interface DroneEntry extends Partial<OdidDetection> {
 interface DroneStore {
   // BLE-detected drones (guest mode)
   bleDrones: Record<string, DroneEntry>;
-  // Backend-synced drones (authenticated mode)
+  // Backend drones are session-scoped: they persist until the deployment
+  // they belong to becomes inactive (passive mode entered, or a different
+  // deployment becomes the active target). They are NOT evicted by age.
+  // Prior implementation used a 60s sweep coupled to a 60s REST hydrate
+  // filter; both have been removed. See Commit 3 / Phase 2. When the user
+  // opens the app from a push notification for a drone that stopped
+  // transmitting minutes ago, the whole point of the notification is
+  // "look at the map" — silent age-based eviction defeats that. The
+  // tradeoff is that stale drones may linger on the map until the
+  // deployment ends; a per-drone freshness indicator is the planned
+  // mitigation, not eviction.
   backendDrones: Record<string, any>;
   // Per-org nickname overrides keyed by uas_id. Seeded from
   // GET /api/orgs/:id/drone-nicknames on login/screen mount and kept
@@ -41,6 +51,12 @@ interface DroneStore {
   clearBleDrones: () => void;
   setBackendDrones: (drones: Record<string, any>) => void;
   updateBackendDrone: (drone: any) => void;
+  // Drops every backendDrones entry whose deployment_id matches. Called
+  // by LiveMapScreen on mode transitions: entering passive mode (clears
+  // the previously-active deployment) and switching from one active
+  // deployment to another (clears the prior one). No-op for the
+  // same-deployment idempotent refresh path.
+  clearBackendDronesForDeployment: (deploymentId: string) => void;
   setNicknames: (map: Record<string, string>) => void;
   updateNickname: (uasId: string, nickname: string | null) => void;
   nearbyNodes: Record<string, { mac: string; rssi: number; lastSeen: number }>;
@@ -173,6 +189,22 @@ export const useDroneStore = create<DroneStore>((set) => ({
     });
   },
 
+  clearBackendDronesForDeployment: (deploymentId) => {
+    set(state => {
+      const next: Record<string, any> = {};
+      let changed = false;
+      for (const k of Object.keys(state.backendDrones)) {
+        const d = state.backendDrones[k];
+        if (d && d.deployment_id === deploymentId) {
+          changed = true;
+          continue;
+        }
+        next[k] = d;
+      }
+      return changed ? { backendDrones: next } : state;
+    });
+  },
+
   updateNearbyNode: (mac, rssi) => {
     set(state => ({
       nearbyNodes: {
@@ -196,37 +228,20 @@ export const useDroneStore = create<DroneStore>((set) => ({
 }));
 
 const BLE_DRONE_STALE_MS = 30_000;
-// Matches the web dashboard's DRONE_TIMEOUT_MS (Dashboard.jsx:5). Keeping
-// the constant aligned across platforms means a drone evicts at the same
-// wall-clock moment on mobile and desktop.
-const BACKEND_DRONE_STALE_MS = 60_000;
 const CLEANUP_INTERVAL_MS = 10_000;
 
+// BLE drones (guest mode) have no other lifecycle — without this sweep
+// a drone that flew out of range would linger in local state forever.
+// Backend drones are deliberately NOT swept by age; see the backendDrones
+// field comment on the DroneStore interface above. The previous BACKEND_
+// DRONE_STALE_MS sweep was removed in Commit 3 / Phase 2 along with the
+// coupled 60s REST hydrate filter on LiveMapScreen.
 setInterval(() => {
   const now = Date.now();
   const state = useDroneStore.getState();
-
-  // BLE sweep — guest-mode local detections, keyed on numeric lastSeen.
   for (const uasId of Object.keys(state.bleDrones)) {
     if (now - state.bleDrones[uasId].lastSeen > BLE_DRONE_STALE_MS) {
       state.removeDrone(uasId);
     }
   }
-
-  // Backend sweep — authenticated detections keyed on last_seen (ISO string
-  // from Postgres). Rebuild the map once per interval rather than calling
-  // set() per-drone to minimize re-renders; only commit when something was
-  // actually evicted.
-  const nextBackend: Record<string, any> = {};
-  let changed = false;
-  for (const uasId of Object.keys(state.backendDrones)) {
-    const d = state.backendDrones[uasId];
-    const lastSeenMs = d.last_seen ? new Date(d.last_seen).getTime() : 0;
-    if (lastSeenMs && now - lastSeenMs > BACKEND_DRONE_STALE_MS) {
-      changed = true;
-      continue;
-    }
-    nextBackend[uasId] = d;
-  }
-  if (changed) useDroneStore.setState({ backendDrones: nextBackend });
 }, CLEANUP_INTERVAL_MS);
