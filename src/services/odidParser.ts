@@ -21,6 +21,14 @@ export interface OdidDetection {
   status?: number; // 0=undeclared, 1=ground, 2=airborne, 3=emergency
   opLat?: number;
   opLon?: number;
+  // ASTM F3411-22a Location message bytes 21-22 (uint16 LE): deciseconds
+  // since the most recent UTC hour, range 0-36000. Drone-self-reported.
+  // Used by the backend stale-frame gate to suppress phantom POSTs from
+  // firmware cached re-broadcasts. Mirrors OdidParser.kt; the JS-side
+  // parser doesn't feed the upload path (that's native via
+  // BLEScannerService.kt + DetectionUploader.kt), but kept in parity so
+  // any JS-side consumer has the same signal available.
+  odidTimestamp?: number;
   lastSeen: number;
 }
 
@@ -63,6 +71,7 @@ function parseLocation(msg: Uint8Array): Partial<OdidDetection> {
   const latRaw = readInt32LE(msg, 5);
   const lonRaw = readInt32LE(msg, 9);
   const altGeoRaw = readUInt16LE(msg, 15);
+  const tsRaw = readUInt16LE(msg, 21);
 
   const lat = latRaw / 1e7;
   const lon = lonRaw / 1e7;
@@ -72,7 +81,7 @@ function parseLocation(msg: Uint8Array): Partial<OdidDetection> {
 
   if (lat === 0 && lon === 0) return { msgType, hasLocation: false };
 
-  return { msgType, hasLocation: true, lat, lon, altGeo, speedHoriz, heading, status };
+  return { msgType, hasLocation: true, lat, lon, altGeo, speedHoriz, heading, status, odidTimestamp: tsRaw };
 }
 
 function parseSystem(msg: Uint8Array): Partial<OdidDetection> {

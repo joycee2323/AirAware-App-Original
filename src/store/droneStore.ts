@@ -28,17 +28,24 @@ export interface DroneEntry extends Partial<OdidDetection> {
 interface DroneStore {
   // BLE-detected drones (guest mode)
   bleDrones: Record<string, DroneEntry>;
-  // Backend drones are session-scoped: they persist until the deployment
-  // they belong to becomes inactive (passive mode entered, or a different
-  // deployment becomes the active target). They are NOT evicted by age.
-  // Prior implementation used a 60s sweep coupled to a 60s REST hydrate
-  // filter; both have been removed. See Commit 3 / Phase 2. When the user
-  // opens the app from a push notification for a drone that stopped
-  // transmitting minutes ago, the whole point of the notification is
-  // "look at the map" — silent age-based eviction defeats that. The
-  // tradeoff is that stale drones may linger on the map until the
-  // deployment ends; a per-drone freshness indicator is the planned
-  // mitigation, not eviction.
+  // Backend drones are evicted by age — entries whose `last_seen` is more
+  // than BACKEND_DRONE_STALE_MS old are removed by the periodic sweep at
+  // the bottom of this file. Erik's product expectation: land the drone,
+  // it comes off the map fast. The sweep window (60s) pairs with the
+  // backend's ODID self-clock stale-frame gate (Commit 5): when a drone
+  // goes silent and the firmware re-emits cached frames, the backend
+  // freezes `last_seen` at the last fresh frame's time, so the sweep
+  // clears the marker within ~60s of the drone actually landing — not
+  // 60s after the firmware's silent_timeout_s eviction.
+  //
+  // This is the Commit 3 walk-back. Commit 3 removed the sweep on the
+  // belief that drones should linger until the deployment ends, but the
+  // real bug Commit 3 was working around was upstream phantom POSTs from
+  // firmware cached re-broadcasts. Commit 5 addresses those at the
+  // source (server-side ODID timestamp gate), making the sweep safe to
+  // restore. The Commit 3 hydrate cutoff is NOT restored — REST hydrate
+  // returns every row the backend has and the sweep then ages out
+  // anything stale, decoupling display freshness from REST behavior.
   //
   // Keyed by `${deployment_id}:${uas_id}` so the same uas_id can appear in
   // multiple simultaneously-active deployments without overwriting itself.
@@ -280,20 +287,46 @@ export const useDroneStore = create<DroneStore>((set) => ({
 }));
 
 const BLE_DRONE_STALE_MS = 30_000;
+// Backend drones evict at 60s past `last_seen`. The backend's Commit 5
+// stale-frame gate freezes `last_seen` when the firmware re-broadcasts
+// cached frames, so this sweep clears the marker ~60s after the drone
+// actually landed — not 60s after the firmware finally stopped relaying
+// it. The REST hydrate path passes every returned row to
+// updateBackendDrone (no client-side last_seen cutoff — that was the
+// Commit 3 design lesson); the sweep then ages stale entries out
+// independently. Restored in Commit 5; for the Commit 3 walk-back
+// rationale, see the backendDrones field comment on the DroneStore
+// interface above.
+const BACKEND_DRONE_STALE_MS = 60_000;
 const CLEANUP_INTERVAL_MS = 10_000;
 
-// BLE drones (guest mode) have no other lifecycle — without this sweep
-// a drone that flew out of range would linger in local state forever.
-// Backend drones are deliberately NOT swept by age; see the backendDrones
-// field comment on the DroneStore interface above. The previous BACKEND_
-// DRONE_STALE_MS sweep was removed in Commit 3 / Phase 2 along with the
-// coupled 60s REST hydrate filter on LiveMapScreen.
 setInterval(() => {
   const now = Date.now();
   const state = useDroneStore.getState();
+
+  // BLE-side sweep: guest-mode local detections, keyed on numeric
+  // lastSeen. Without this a drone that flew out of range would linger
+  // in local state forever.
   for (const uasId of Object.keys(state.bleDrones)) {
     if (now - state.bleDrones[uasId].lastSeen > BLE_DRONE_STALE_MS) {
       state.removeDrone(uasId);
     }
   }
+
+  // Backend-side sweep: drop entries whose `last_seen` (ISO string from
+  // Postgres) is older than BACKEND_DRONE_STALE_MS. Rebuild the map
+  // once per interval rather than calling set() per-drone to minimize
+  // re-renders; only commit when something was actually evicted.
+  const nextBackend: Record<string, any> = {};
+  let changed = false;
+  for (const k of Object.keys(state.backendDrones)) {
+    const d = state.backendDrones[k];
+    const lastSeenMs = d.last_seen ? new Date(d.last_seen).getTime() : 0;
+    if (lastSeenMs && now - lastSeenMs > BACKEND_DRONE_STALE_MS) {
+      changed = true;
+      continue;
+    }
+    nextBackend[k] = d;
+  }
+  if (changed) useDroneStore.setState({ backendDrones: nextBackend });
 }, CLEANUP_INTERVAL_MS);

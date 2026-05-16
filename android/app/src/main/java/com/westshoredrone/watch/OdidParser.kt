@@ -22,6 +22,14 @@ object OdidParser {
         val status: Int? = null,
         val opLat: Double? = null,
         val opLon: Double? = null,
+        // ASTM F3411-22a Location message bytes 21-22 (uint16 LE):
+        // deciseconds since the most recent UTC hour, range 0-36000.
+        // Drone-self-reported; advances every frame on a real airborne
+        // drone, stays constant in firmware cached re-broadcasts. The
+        // backend's stale-frame gate compares this to the last stored
+        // value to suppress phantom POSTs. See migration 052 and
+        // routes/nodes.js gate site.
+        val odidTimestamp: Int? = null,
     ) {
         fun merge(other: Result): Result = Result(
             msgType = other.msgType ?: this.msgType,
@@ -37,6 +45,7 @@ object OdidParser {
             status = other.status ?: this.status,
             opLat = other.opLat ?: this.opLat,
             opLon = other.opLon ?: this.opLon,
+            odidTimestamp = other.odidTimestamp ?: this.odidTimestamp,
         )
     }
 
@@ -83,6 +92,7 @@ object OdidParser {
         val latRaw = readInt32LE(msg, 5)
         val lonRaw = readInt32LE(msg, 9)
         val altGeoRaw = readUInt16LE(msg, 15)
+        val tsRaw = readUInt16LE(msg, 21)
 
         val lat = latRaw / 1e7
         val lon = lonRaw / 1e7
@@ -101,6 +111,7 @@ object OdidParser {
             speedHoriz = speedHoriz,
             heading = heading,
             status = status,
+            odidTimestamp = tsRaw,
         )
     }
 

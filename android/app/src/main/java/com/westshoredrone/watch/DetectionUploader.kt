@@ -86,6 +86,13 @@ class DetectionUploader(private val handler: Handler, private val context: Conte
         val hdg: Double?,
         val opLat: Double?,
         val opLon: Double?,
+        // ASTM F3411-22a Location message timestamp (deciseconds since the
+        // most recent UTC hour, range 0-36000). Drone-self-reported. The
+        // backend's stale-frame gate compares this to the last stored value
+        // to suppress phantom POSTs from firmware cached re-broadcasts.
+        // Nullable for forward compat (older Android builds may not have
+        // populated it); backend treats missing as "skip the gate".
+        val odidTimestamp: Int?,
     )
 
     fun configure(baseUrl: String?, authToken: String?) {
@@ -245,6 +252,7 @@ class DetectionUploader(private val handler: Handler, private val context: Conte
             o.put("hdg", d.hdg ?: JSONObject.NULL)
             o.put("op_lat", d.opLat ?: JSONObject.NULL)
             o.put("op_lon", d.opLon ?: JSONObject.NULL)
+            o.put("ts", d.odidTimestamp ?: JSONObject.NULL)
             dronesJson.put(o)
         }
         val bodyJson = JSONObject().put("drones", dronesJson).toString()

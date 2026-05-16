@@ -458,6 +458,7 @@ class BLEScannerService : Service() {
                 hdg = parsed.heading,
                 opLat = parsed.opLat,
                 opLon = parsed.opLon,
+                odidTimestamp = parsed.odidTimestamp,
             ),
         )
     }
