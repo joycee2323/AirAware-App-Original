@@ -50,14 +50,6 @@ module.exports = ({ config }) => ({
     },
     plugins: [
       [
-        'react-native-ble-plx',
-        {
-          isBackgroundEnabled: true,
-          modes: ['peripheral', 'central'],
-          bluetoothAlwaysPermission: 'Westshore Watch uses Bluetooth to detect nearby drones broadcasting Remote ID signals.',
-        },
-      ],
-      [
         '@rnmapbox/maps',
         {
           RNMapboxMapsDownloadToken: process.env.MAPBOX_DOWNLOAD_TOKEN,
