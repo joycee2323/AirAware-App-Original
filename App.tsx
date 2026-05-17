@@ -1,6 +1,8 @@
 import React, { useEffect } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFonts } from 'expo-font';
+import { Ionicons } from '@expo/vector-icons';
 import AppNavigator from './src/navigation/AppNavigator';
 import { initDroneNotifications } from './src/services/droneNotifier';
 import { configureNotificationHandler, setupAndroidChannels } from './src/services/pushNotifications';
@@ -30,10 +32,33 @@ async function migrateKeepScreenOnKey() {
 }
 
 export default function App() {
+  // Pre-load icon fonts at the app root. SDK 53's @expo/vector-icons 14.1
+  // ships the lazy `IconsLazy` entry; its per-icon-set createIconSet has
+  // a componentDidMount Font.loadAsync call that silently swallows
+  // rejections, leaving icons stuck on the empty <Text /> fallback if
+  // the load fails. Loading upfront via useFonts surfaces failures and
+  // ensures the per-icon mount path short-circuits via Font.isLoaded.
+  const [fontsLoaded, fontError] = useFonts({
+    ...Ionicons.font,
+  });
+
   useEffect(() => {
     void migrateKeepScreenOnKey();
     void initDroneNotifications();
   }, []);
+
+  useEffect(() => {
+    if (fontError) {
+      console.warn('[fonts] Ionicons load failed:', fontError);
+    }
+  }, [fontError]);
+
+  // Fail open: if the font load errors, still render the app (with
+  // missing icons) rather than stranding users on the splash screen.
+  if (!fontsLoaded && !fontError) {
+    return null;
+  }
+
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <AppNavigator />

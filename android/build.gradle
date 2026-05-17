@@ -8,9 +8,12 @@ buildscript {
         targetSdkVersion = Integer.parseInt(findProperty('android.targetSdkVersion') ?: '35')
         kotlinVersion = findProperty('android.kotlinVersion') ?: '1.9.25'
 
-        // NDK r27c — first NDK that links app-owned native code to 16 KB page
-        // alignment by default. Required for Play Store 16 KB compliance.
-        ndkVersion = "27.1.12297006"
+        // NDK r28 — makes 16 KB page alignment the universal default for
+        // both locally-compiled and prebuilt NDK-shipped .so files
+        // (notably libc++_shared.so). r27 only supported 16 KB as an
+        // option; r28 makes it default. Required for Play Store 16 KB
+        // compliance — see Commit 9 audit.
+        ndkVersion = "28.0.13004108"
     }
     repositories {
         google()

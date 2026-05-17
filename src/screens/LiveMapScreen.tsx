@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  View, Text, TextInput, StyleSheet, TouchableOpacity, Platform, PermissionsAndroid, AppState, Linking, Alert, DeviceEventEmitter,
+  View, Text, TextInput, StyleSheet, TouchableOpacity, Platform, PermissionsAndroid, AppState, Linking, Alert, DeviceEventEmitter, ActivityIndicator,
 } from 'react-native';
 import MapboxGL from '@rnmapbox/maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -124,6 +124,15 @@ export default function LiveMapScreen() {
   const [nodes, setNodes] = useState<any[]>([]);
   const nodesRef = useRef<any[]>([]);
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
+  // Gate the MapView render on permission resolution. On a fresh install,
+  // mounting MapView before the OS permission prompt is answered causes
+  // Mapbox's native LocationManager to initialize in a "denied" state and
+  // never recover — the user-location marker doesn't appear until the
+  // next app launch. Showing a spinner until requestPermissions() resolves
+  // (granted OR denied) ensures the first MapView mount happens with the
+  // permission state settled. See lifecycle comment at requestPermissions
+  // call site for the full race description.
+  const [permissionResolved, setPermissionResolved] = useState(false);
   // `nodes` above is scoped to the active deployment; this tracks whether the
   // user has registered ANY node across their account (drives the empty-state
   // banner for users who skipped onboarding).
@@ -261,6 +270,10 @@ export default function LiveMapScreen() {
     void fetchNodeRegistry();
     void checkUserNodes();
     requestPermissions().then(() => {
+      // Unblock the MapView render — permission state is now settled
+      // (granted or denied) so Mapbox's native LocationManager will
+      // initialize with the correct OS state on first mount.
+      setPermissionResolved(true);
       loadActiveDeployment();
       startBleScanning(
         det => {
@@ -298,6 +311,13 @@ export default function LiveMapScreen() {
           );
         }
       });
+    }).catch((err: any) => {
+      // Fail open: a catastrophic permission-request failure shouldn't
+      // strand the user on the spinner. Unblock the render so the rest
+      // of the app is usable; the marker just won't appear (same
+      // outcome as if permission were denied).
+      console.warn('[livemap] permission request error:', err);
+      setPermissionResolved(true);
     });
     return () => {
       wsRef.current?.close();
@@ -379,6 +399,49 @@ export default function LiveMapScreen() {
       console.log('Notification permission:', notifResult);
     }
   };
+
+  // Initial camera centering. Replaces the auto-follow-user behavior that
+  // <Camera followUserLocation> used to provide before user-location was
+  // removed in versionCode 9 (see TODO in render JSX below). Fires once on
+  // first opportunity; the ref-guard prevents re-centering when data
+  // arrives later. Priority:
+  //   1. selectedDrone (rare at mount; covers the case where the user
+  //      navigated in with a drone already selected via deep-link)
+  //   2. first online node with coords (typical case for operators with
+  //      deployed nodes)
+  //   3. Cleveland-area fallback (deployment record has no center field;
+  //      Westshore Drone Services operates out of NE Ohio)
+  const hasInitiallyCenteredRef = useRef(false);
+  useEffect(() => {
+    if (hasInitiallyCenteredRef.current) return;
+    if (!cameraRef.current) return;
+
+    let center: [number, number] | null = null;
+
+    if (selectedDrone?.last_lat && selectedDrone?.last_lon) {
+      center = [selectedDrone.last_lon, selectedDrone.last_lat];
+    } else {
+      const onlineNode = nodes.find(n =>
+        n.status === 'online' && n.last_lat && n.last_lon);
+      if (onlineNode) {
+        center = [onlineNode.last_lon, onlineNode.last_lat];
+      } else {
+        // Cleveland-area fallback (downtown Cleveland coords).
+        center = [-81.6944, 41.4993];
+      }
+    }
+
+    try {
+      cameraRef.current.setCamera({
+        centerCoordinate: center,
+        zoomLevel: 14,
+        animationDuration: 0,
+      });
+      hasInitiallyCenteredRef.current = true;
+    } catch (err) {
+      console.warn('[livemap] initial camera centering failed:', err);
+    }
+  }, [nodes, selectedDrone, permissionResolved]);
 
   // Helper used by both mode helpers below: ensures the WS is connected
   // and either resubscribes the existing socket to a new shape (cheap,
@@ -767,6 +830,18 @@ export default function LiveMapScreen() {
 
   const s = styles(colors);
 
+  // See `permissionResolved` declaration for the race-condition rationale.
+  // Show a spinner until the OS permission prompt has been answered;
+  // mounting MapView before then is what causes the fresh-install marker
+  // bug.
+  if (!permissionResolved) {
+    return (
+      <View style={s.loadingContainer}>
+        <ActivityIndicator size="large" color={colors.cyan} />
+      </View>
+    );
+  }
+
   return (
     <View style={s.container}>
       <MapboxGL.MapView
@@ -780,13 +855,17 @@ export default function LiveMapScreen() {
           if (selectedDrone) setSelectedDrone(null);
         }}
       >
-        <MapboxGL.Camera
-          ref={cameraRef}
-          followUserLocation={!selectedDrone}
-          followUserMode={MapboxGL.UserTrackingMode.Follow}
-          followZoomLevel={14}
-        />
-        <MapboxGL.UserLocation />
+        <MapboxGL.Camera ref={cameraRef} />
+        {/* TODO(followup): restore user-location marker. Removed in versionCode 9
+            due to Mapbox 10.3.1 + RN 0.79 + old-arch incompatibility. Three
+            patches in patches/@rnmapbox+maps+10.3.1.patch address part of the
+            chain but JS->native start() dispatch on old arch is broken at the
+            codegen layer. Options: (a) migrate to newArchEnabled=true in a
+            future SDK bump, (b) custom marker driven by expo-location, (c) wait
+            for Mapbox upstream fix. Initial camera centering is now handled
+            by the useEffect above this return statement; node positioning is
+            unaffected (NodeHeartbeatUploader.kt uses android.location.LocationManager
+            directly, independent of Mapbox). */}
 
         {/* Node markers */}
         {nodesToRender.map(node => {
@@ -1124,6 +1203,7 @@ export default function LiveMapScreen() {
 
 const styles = (c: ReturnType<typeof useTheme>) => StyleSheet.create({
   container: { flex: 1, backgroundColor: c.bg },
+  loadingContainer: { flex: 1, backgroundColor: c.bg, justifyContent: 'center', alignItems: 'center' },
   topBar: {
     position: 'absolute', top: 0, left: 0, right: 0,
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
