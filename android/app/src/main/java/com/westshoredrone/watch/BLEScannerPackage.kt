@@ -20,7 +20,12 @@ class BLEScannerPackage : BaseReactPackage() {
                     false, // canOverrideExistingModule
                     false, // needsEagerInit
                     false, // isCxxModule
-                    BuildConfig.IS_NEW_ARCHITECTURE_ENABLED, // isTurboModule
+                    // isTurboModule = false even under new arch — the underlying
+                    // BLEScannerModule still extends ReactContextBaseJavaModule and
+                    // uses the legacy bridge. Phase 3 will migrate the module class
+                    // to extend the codegen-generated NativeBLEScannerSpec and flip
+                    // this to true.
+                    false, // isTurboModule
                 )
             )
         }
