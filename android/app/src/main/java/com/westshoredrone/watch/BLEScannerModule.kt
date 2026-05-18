@@ -16,19 +16,16 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.bridge.ReactContextBaseJavaModule
-import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.module.annotations.ReactModule
 
 @ReactModule(name = BLEScannerModule.NAME)
 class BLEScannerModule(reactContext: ReactApplicationContext) :
-    ReactContextBaseJavaModule(reactContext) {
+    NativeBLEScannerSpec(reactContext) {
 
     override fun getName(): String = NAME
 
-    @ReactMethod
-    fun startService(promise: Promise) {
+    override fun startService(promise: Promise) {
         try {
             val ctx = reactApplicationContext
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -112,8 +109,7 @@ class BLEScannerModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
-    fun configure(config: ReadableMap, promise: Promise) {
+    override fun configure(config: ReadableMap, promise: Promise) {
         try {
             val baseUrl = if (config.hasKey("baseUrl")) config.getString("baseUrl") else null
             val authToken = if (config.hasKey("authToken")) config.getString("authToken") else null
@@ -124,18 +120,15 @@ class BLEScannerModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
-    fun addListener(eventName: String) {
+    override fun addListener(eventType: String) {
         // Required for RN NativeEventEmitter; no-op.
     }
 
-    @ReactMethod
-    fun removeListeners(count: Int) {
+    override fun removeListeners(count: Double) {
         // Required for RN NativeEventEmitter; no-op.
     }
 
-    @ReactMethod
-    fun getWatchdogStats(promise: Promise) {
+    override fun getWatchdogStats(promise: Promise) {
         try {
             promise.resolve(BLEScannerService.watchdogStats())
         } catch (e: Throwable) {
@@ -143,8 +136,7 @@ class BLEScannerModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
-    fun stopService(promise: Promise) {
+    override fun stopService(promise: Promise) {
         try {
             val ctx = reactApplicationContext
             val intent = Intent(ctx, BLEScannerService::class.java).apply {

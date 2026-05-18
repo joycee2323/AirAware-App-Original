@@ -1,5 +1,6 @@
-import { NativeModules, NativeEventEmitter, Platform, EmitterSubscription, DeviceEventEmitter } from 'react-native';
+import { NativeEventEmitter, Platform, EmitterSubscription, DeviceEventEmitter } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import NativeBLEScanner from '../specs/NativeBLEScanner';
 import { parseOdidAdvertisement, OdidDetection } from './odidParser';
 import { notifyNewDrone } from './droneNotifier';
 
@@ -11,15 +12,13 @@ export interface WatchdogStats {
   scanning: boolean;
 }
 
-const { BLEScanner } = NativeModules as {
-  BLEScanner?: {
-    startService: () => Promise<void>;
-    stopService: () => Promise<void>;
-    configure: (config: { baseUrl?: string; authToken?: string | null }) => Promise<void>;
-    getWatchdogStats: () => Promise<WatchdogStats>;
-    addListener: (eventName: string) => void;
-    removeListeners: (count: number) => void;
-  };
+const BLEScanner = NativeBLEScanner as unknown as {
+  startService: () => Promise<void>;
+  stopService: () => Promise<void>;
+  configure: (config: { baseUrl?: string; authToken?: string | null }) => Promise<void>;
+  getWatchdogStats: () => Promise<WatchdogStats>;
+  addListener: (eventName: string) => void;
+  removeListeners: (count: number) => void;
 };
 
 const UPLOAD_BASE_URL = 'https://api.westshoredrone.com';

@@ -331,8 +331,12 @@ class DetectionUploader(private val handler: Handler, private val context: Conte
 
     private fun emitEvent(name: String, payload: WritableMap) {
         val app = context.applicationContext as? ReactApplication ?: return
-        val reactContext: ReactContext? =
+        val reactContext: ReactContext? = if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
+            app.reactHost?.currentReactContext
+        } else {
+            @Suppress("DEPRECATION")
             app.reactNativeHost.reactInstanceManager.currentReactContext
+        }
         if (reactContext == null || !reactContext.hasActiveReactInstance()) return
         try {
             reactContext.emitDeviceEvent(name, payload)
