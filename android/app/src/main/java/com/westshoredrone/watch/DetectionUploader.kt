@@ -8,7 +8,6 @@ import com.facebook.react.ReactApplication
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactContext
 import com.facebook.react.bridge.WritableMap
-import com.facebook.react.modules.core.DeviceEventManagerModule
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -336,9 +335,7 @@ class DetectionUploader(private val handler: Handler, private val context: Conte
             app.reactNativeHost.reactInstanceManager.currentReactContext
         if (reactContext == null || !reactContext.hasActiveReactInstance()) return
         try {
-            reactContext
-                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-                .emit(name, payload)
+            reactContext.emitDeviceEvent(name, payload)
         } catch (t: Throwable) {
             Log.w(TAG, "emitEvent failed: ${t.message}")
         }

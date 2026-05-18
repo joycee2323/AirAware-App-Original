@@ -19,11 +19,13 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.module.annotations.ReactModule
 
+@ReactModule(name = BLEScannerModule.NAME)
 class BLEScannerModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
-    override fun getName(): String = "BLEScanner"
+    override fun getName(): String = NAME
 
     @ReactMethod
     fun startService(promise: Promise) {
@@ -157,6 +159,7 @@ class BLEScannerModule(reactContext: ReactApplicationContext) :
     }
 
     companion object {
+        const val NAME = "BLEScanner"
         private const val SERVICE_START_VERIFY_DELAY_MS = 1_000L
     }
 }

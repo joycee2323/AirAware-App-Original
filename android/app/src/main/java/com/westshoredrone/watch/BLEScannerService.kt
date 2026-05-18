@@ -33,7 +33,6 @@ import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactContext
 import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
-import com.facebook.react.modules.core.DeviceEventManagerModule
 
 class BLEScannerService : Service() {
 
@@ -473,9 +472,7 @@ class BLEScannerService : Service() {
             app.reactNativeHost.reactInstanceManager.currentReactContext
         if (reactContext == null || !reactContext.hasActiveReactInstance()) return
         try {
-            reactContext
-                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-                .emit(name, payload)
+            reactContext.emitDeviceEvent(name, payload)
         } catch (t: Throwable) {
             Log.w(TAG, "emitEvent failed: ${t.message}")
         }
